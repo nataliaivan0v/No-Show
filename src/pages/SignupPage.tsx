@@ -14,8 +14,10 @@ export default function SignupPage() {
     const { error } = await supabase.auth.signUp({
       email,
       password,
+      // full_name is passed as user metadata so Supabase can write it to the profiles table on signup
       options: { data: { full_name: name } },
     });
+    // On success, no explicit redirect needed — the auth state change in App.tsx handles it
     if (error) setError(error.message);
   };
 

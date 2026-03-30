@@ -1,6 +1,6 @@
 import { useNavigate, useLocation } from "react-router-dom";
-import { type Profile } from "../../types";
 
+// All top-level nav destinations, rendered as tabs in order
 const navTabs = [
   { path: "/dashboard", label: "My Dashboard" },
   { path: "/inbox", label: "Inbox" },
@@ -9,15 +9,14 @@ const navTabs = [
   { path: "/account", label: "My Account" },
 ];
 
+// pendingCount is the number of unread notifications
 export default function Navbar({
   pendingCount,
 }: {
-  profile: Profile;
   pendingCount: number;
-  onSignOut: () => void;
 }) {
   const nav = useNavigate();
-  const { pathname } = useLocation();
+  const { pathname } = useLocation(); // used to highlight the currently active tab
 
   return (
     <nav
@@ -63,6 +62,7 @@ export default function Navbar({
                 padding: "8px 14px",
                 fontFamily: "'Afacad', sans-serif",
                 fontSize: 15,
+                // bold + orange underline on the active tab
                 fontWeight: active ? 700 : 500,
                 color: active ? "#F35C20" : "#111",
                 cursor: "pointer",
@@ -75,6 +75,7 @@ export default function Navbar({
                 alignItems: "center",
                 gap: 6,
               }}
+              // hover color handled via JS since we're using inline styles (no CSS classes)
               onMouseOver={(e) => {
                 if (!active) e.currentTarget.style.color = "#F35C20";
               }}
@@ -83,6 +84,7 @@ export default function Navbar({
               }}
             >
               {t.label}
+              {/* Badge showing number of pending inbox items — only shown when > 0 */}
               {t.path === "/inbox" && pendingCount > 0 && (
                 <span
                   style={{

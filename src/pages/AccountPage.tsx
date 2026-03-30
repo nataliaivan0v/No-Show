@@ -34,6 +34,7 @@ export default function AccountPage({
     setLoading(false);
   };
 
+  // Discard edits and revert the name field to what was last saved
   const handleCancel = () => {
     setFullName(profile.full_name);
     setEditing(false);
@@ -142,6 +143,7 @@ export default function AccountPage({
           </button>
         )}
 
+        {/* Save feedback — green for success, red for errors */}
         {status && (
           <p
             style={{
@@ -172,6 +174,7 @@ export default function AccountPage({
   );
 }
 
+// Shared field styles for the read-only profile display
 const fieldLabelStyle: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 700,
@@ -225,6 +228,7 @@ const outlineBtnStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
+// Red-tinted button used for destructive actions (sign out)
 const dangerBtnStyle: React.CSSProperties = {
   background: "transparent",
   color: "#ef4444",

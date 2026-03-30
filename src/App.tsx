@@ -19,11 +19,15 @@ import NotificationInbox from "./components/Waitlist/NotificationInbox";
 import WaitlistForm from "./components/Waitlist/WaitlistForm";
 import PostSpotForm from "./components/Spots/PostSpotForm";
 
+// Wraps all authenticated routes — owns the Navbar and the inbox badge count
 function AuthedLayout({ profile }: { profile: Profile }) {
+  // refreshKey is incremented after posting a spot; not consumed here but can be
+  // passed down to trigger re-fetches in child components if needed in future
   const [, setRefreshKey] = useState(0);
   const [pendingCount, setPendingCount] = useState(0);
   const location = useLocation();
 
+  // Uses head:true so Supabase returns only the count, not the full rows
   const fetchPending = async () => {
     const { count } = await supabase
       .from("notifications")
@@ -33,6 +37,7 @@ function AuthedLayout({ profile }: { profile: Profile }) {
     setPendingCount(count ?? 0);
   };
 
+  // Keep the badge count live via realtime so it updates without a page refresh
   useEffect(() => {
     fetchPending();
     const channel = supabase
@@ -53,17 +58,14 @@ function AuthedLayout({ profile }: { profile: Profile }) {
     };
   }, [profile.id]);
 
+  // Clear the badge immediately when the user navigates to the inbox
   useEffect(() => {
     if (location.pathname === "/inbox") setPendingCount(0);
   }, [location.pathname]);
 
   return (
     <>
-      <Navbar
-        profile={profile}
-        pendingCount={pendingCount}
-        onSignOut={() => supabase.auth.signOut()}
-      />
+      <Navbar pendingCount={pendingCount} />
       <div
         style={{
           minHeight: "100vh",
@@ -131,11 +133,13 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Check for an existing session on mount (e.g. page refresh while already logged in)
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) fetchProfile(session.user.id);
       else setLoading(false);
     });
 
+    // Also listen for auth changes — handles login/logout from LoginPage and SignupPage
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_e, session) => {
@@ -154,6 +158,7 @@ export default function App() {
       .select("*")
       .eq("id", uid)
       .single();
+    // Email lives in auth.users, not the profiles table, so we fetch it separately
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -166,6 +171,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Public routes — redirect to dashboard if already logged in */}
         <Route
           path="/"
           element={!profile ? <LandingPage /> : <Navigate to="/dashboard" />}
@@ -178,6 +184,7 @@ export default function App() {
           path="/signup"
           element={!profile ? <SignupPage /> : <Navigate to="/dashboard" />}
         />
+        {/* All other routes require auth — redirect to landing if not logged in */}
         <Route
           path="/*"
           element={

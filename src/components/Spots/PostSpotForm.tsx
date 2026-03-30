@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { supabase } from "../../lib/supabase";
 import { notifyNextSeeker } from "../../lib/matching";
 
+// Options for the class type and level dropdowns
 const CLASS_TYPES = [
   "Yoga",
   "Spin",
@@ -24,6 +25,7 @@ const CLASS_LEVELS = [
   "Advanced",
 ];
 
+// Formats a full name as "First L." for display (e.g. "Sarah Mitchell" → "Sarah M.")
 function getNameDisplay(fullName: string): string {
   const parts = fullName.trim().split(" ");
   if (parts.length === 1) return parts[0];
@@ -49,6 +51,7 @@ export default function PostSpotForm({
   const [profileName, setProfileName] = useState("");
   const [status, setStatus] = useState("");
 
+  // Fetch the poster's name once on mount so it can be prepended to claim_info
   useEffect(() => {
     supabase
       .from("profiles")
@@ -61,6 +64,7 @@ export default function PostSpotForm({
   }, [posterId]);
 
   const handleSubmit = async () => {
+    // Validate required fields
     if (
       !studio ||
       !className ||
@@ -73,6 +77,7 @@ export default function PostSpotForm({
       return;
     }
 
+    // Reject classes that are in the past or less than 1 hour away
     const scheduledAt = new Date(`${classDate}T${classTime}`).toISOString();
     const oneHourFromNow = Date.now() + 60 * 60 * 1000;
     if (new Date(scheduledAt).getTime() < Date.now()) {
@@ -84,6 +89,7 @@ export default function PostSpotForm({
       return;
     }
 
+    // Always prepend the poster's booking name; append any extra notes below it
     const bookingLine = `Booking name: ${profileName}`;
     const fullClaimInfo = claimInfo.trim()
       ? `${bookingLine}\n${claimInfo.trim()}`
@@ -110,6 +116,7 @@ export default function PostSpotForm({
       return;
     }
 
+    // After inserting, attempt to notify the first matching seeker
     const notified = await notifyNextSeeker(data.id);
     setStatus(
       notified
@@ -268,6 +275,7 @@ export default function PostSpotForm({
           Post Spot
         </button>
 
+        {/* Submission feedback — green for success, red for errors */}
         {status && (
           <p
             style={{
@@ -328,6 +336,7 @@ function Field({
   );
 }
 
+// Shared style for all text inputs, selects, and textareas
 const inputStyle: React.CSSProperties = {
   padding: "12px 16px",
   borderRadius: 10,
@@ -341,6 +350,7 @@ const inputStyle: React.CSSProperties = {
   color: "#111",
 };
 
+// Style for the primary submit button
 const submitBtnStyle: React.CSSProperties = {
   background: "#F35C20",
   color: "#fff",

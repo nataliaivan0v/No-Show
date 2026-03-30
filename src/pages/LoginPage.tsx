@@ -14,6 +14,7 @@ export default function LoginPage() {
       email,
       password,
     });
+    // On success, no explicit redirect needed — the auth state change in App.tsx handles it
     if (error) setError(error.message);
   };
 

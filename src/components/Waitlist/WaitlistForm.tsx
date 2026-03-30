@@ -3,6 +3,7 @@ import { supabase } from "../../lib/supabase";
 import { notifyNextSeeker } from "../../lib/matching";
 import { type WaitlistEntry } from "../../types";
 
+// Options for the preference dropdowns/pills
 const CLASS_TYPES = [
   "Yoga",
   "Spin",
@@ -31,6 +32,7 @@ const TIME_PREFS = [
 ];
 
 export default function WaitlistForm({ seekerId }: { seekerId: string }) {
+  // existing: the seeker's current waitlist entry, or null if they haven't joined yet
   const [existing, setExisting] = useState<WaitlistEntry | null>(null);
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [classLevel, setClassLevel] = useState("");
@@ -39,6 +41,7 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
 
+  // Fetch the seeker's existing waitlist entry on mount and pre-populate the form fields
   useEffect(() => {
     supabase
       .from("waitlist_entries")
@@ -58,6 +61,7 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       });
   }, [seekerId]);
 
+  // Toggle helpers for the multi-select pill groups
   const toggleType = (t: string) =>
     setSelectedTypes((s) =>
       s.includes(t) ? s.filter((x) => x !== t) : [...s, t],
@@ -88,12 +92,13 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       return;
     }
 
+    // After joining, check if any matching spots are already available and notify immediately
     const { data: existingSpots } = await supabase
       .from("spots")
       .select("*")
       .eq("status", "available")
       .in("class_type", selectedTypes)
-      .neq("poster_id", seekerId);
+      .neq("poster_id", seekerId); // don't match the seeker to their own posted spot
 
     if (existingSpots?.length) await notifyNextSeeker(existingSpots[0].id);
 
@@ -130,6 +135,7 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
     setStatus("✅ Preferences updated!");
   };
 
+  // Discard edits and revert form fields back to the last saved preferences
   const handleCancel = () => {
     if (existing) {
       setSelectedTypes(existing.class_types);
@@ -147,6 +153,7 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       </p>
     );
 
+  // Show the editable form if the user clicked "Edit" or hasn't joined yet
   const isEditMode = editing || !existing;
 
   return (
@@ -423,6 +430,7 @@ function PreferenceSection({
   );
 }
 
+// Reusable toggle pill — renders as non-interactive (cursor: default) in read-only mode when no onClick is passed
 function Pill({
   label,
   active,
@@ -455,6 +463,7 @@ function Pill({
   );
 }
 
+// Shared button styles
 const primaryBtnStyle: React.CSSProperties = {
   background: "#F35C20",
   color: "#fff",

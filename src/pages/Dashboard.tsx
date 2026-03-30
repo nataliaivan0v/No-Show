@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { type Profile, type Spot } from '../types'
 import { supabase } from '../lib/supabase'
 
+// Extends Spot with a display role so SpotCard knows whether the user posted or claimed it
 interface SpotWithRole extends Spot {
   role: 'claimed' | 'listed'
 }
@@ -13,10 +14,13 @@ export default function Dashboard({ profile }: { profile: Profile }) {
   const [pastListed, setPastListed] = useState<Spot[]>([])
   const [loading, setLoading] = useState(true)
 
+  // Fetch all four spot lists in a single effect so we only run one round of queries on mount
   useEffect(() => {
     const fetchAll = async () => {
       const now = new Date().toISOString()
 
+      // Spots are linked to a seeker via notifications (not directly), so we look up
+      // claimed spot IDs through the notifications table first
       const { data: claimedNotifs } = await supabase
         .from('notifications')
         .select('spot_id')
@@ -135,11 +139,15 @@ function Column({ title, subtitle, children }: { title: string; subtitle: string
 }
 
 function SpotCard({ spot, role }: { spot: Spot; role: 'claimed' | 'listed' }) {
+  // Status badge label — "Claimed by you" for seekers, otherwise reflects the spot's own status
   const statusLabel = role === 'claimed' ? 'Claimed by you' : spot.status === 'claimed' ? 'Claimed' : 'Available'
+  // Green for claimed spots, orange for available/listed
   const accentColor = spot.status === 'claimed' || role === 'claimed' ? '#22c55e' : '#F35C20'
   const bgColor = spot.status === 'claimed' || role === 'claimed' ? '#f0fdf4' : '#fff3ee'
+  // Booking info is only shown on upcoming claimed spots (not past, not listed)
   const isUpcomingClaim = role === 'claimed' && new Date(spot.scheduled_at) > new Date()
 
+  // Use the browser's local timezone so times aren't shown in UTC
   const formattedDate = new Date(spot.scheduled_at).toLocaleString('en-US', {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     month: 'short', day: 'numeric', year: 'numeric',

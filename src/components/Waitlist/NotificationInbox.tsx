@@ -4,8 +4,10 @@ import { supabase } from "../../lib/supabase";
 import { type Notification, type NotifStatus, type Spot } from "../../types";
 import { rejectSpot } from "../../lib/matching";
 
+// How long a seeker has to claim a spot before it expires and moves to the next person
 const EXPIRY_MS = 30 * 60 * 1000;
 
+// Text color and background color for each notification status badge
 const statusColor: Record<NotifStatus, string> = {
   pending: "#F35C20",
   claimed: "#22c55e",
@@ -18,6 +20,7 @@ const statusBg: Record<NotifStatus, string> = {
   expired: "#fef2f2",
 };
 
+// Displays a live countdown for pending notifications; calls onExpire when time runs out
 function Countdown({
   createdAt,
   onExpire,
@@ -28,6 +31,7 @@ function Countdown({
   const expiresAt = new Date(createdAt).getTime() + EXPIRY_MS;
   const calcRemaining = () => Math.max(0, expiresAt - Date.now());
   const [remaining, setRemaining] = useState(calcRemaining);
+  // Ref prevents onExpire from firing more than once if the interval ticks at 0 multiple times
   const firedRef = useRef(false);
 
   useEffect(() => {
@@ -45,6 +49,7 @@ function Countdown({
 
   const mins = Math.floor(remaining / 60000);
   const secs = Math.floor((remaining % 60000) / 1000);
+  // Turn red when under 5 minutes to signal urgency
   const isUrgent = remaining < 5 * 60 * 1000;
 
   return (
@@ -62,6 +67,7 @@ function Countdown({
 
 export default function NotificationInbox({ seekerId }: { seekerId: string }) {
   const [notifs, setNotifs] = useState<Notification[]>([]);
+  // Stores full spot data for claimed notifications so booking info can be shown
   const [claimedSpots, setClaimedSpots] = useState<Record<string, Spot>>({});
 
   const fetchNotifs = () =>
@@ -72,6 +78,7 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
       .order("created_at", { ascending: false })
       .then(({ data }) => setNotifs(data ?? []));
 
+  // Initial fetch + realtime subscription so the inbox updates without a page refresh
   useEffect(() => {
     fetchNotifs();
     const channel = supabase
@@ -92,6 +99,8 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
     };
   }, [seekerId]);
 
+  // Marks the notification and spot as claimed, bumps the waitlist entry timestamp
+  // (resetting its queue position), then fetches the full spot to reveal booking info
   const claim = async (
     notifId: string,
     spotId: string,
@@ -102,6 +111,7 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
       .update({ status: "claimed" })
       .eq("id", notifId);
     await supabase.from("spots").update({ status: "claimed" }).eq("id", spotId);
+    // Bumping created_at resets the entry's position so it goes to the back of the queue next time
     await supabase
       .from("waitlist_entries")
       .update({ created_at: new Date().toISOString() })
@@ -115,17 +125,20 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
     fetchNotifs();
   };
 
+  // Removes a single notification from the DB and local state
   const deleteNotif = async (notifId: string) => {
     await supabase.from("notifications").delete().eq("id", notifId);
     setNotifs((prev) => prev.filter((n) => n.id !== notifId));
   };
 
+  // Wipes all notifications for this seeker at once
   const clearAll = async () => {
     await supabase.from("notifications").delete().eq("seeker_id", seekerId);
     setNotifs([]);
     setClaimedSpots({});
   };
 
+  // Called by Countdown when time runs out — rejects the spot so the next seeker can be notified
   const handleExpire = async (n: Notification) => {
     await rejectSpot(n.id, n.spot_id, n.waitlist_entry_id);
     fetchNotifs();
@@ -290,6 +303,7 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
               )}
             </div>
 
+            {/* Booking info is only revealed after the seeker claims — fetched in claim() */}
             {n.status === "claimed" && claimedSpots[n.spot_id]?.claim_info && (
               <div
                 style={{
@@ -353,6 +367,7 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
   );
 }
 
+// Shared button styles for the claim/reject actions on pending notifications
 const claimBtnStyle: React.CSSProperties = {
   background: "#F35C20",
   color: "#fff",

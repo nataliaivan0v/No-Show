@@ -1,5 +1,10 @@
 import { supabase } from "./supabase";
 
+// Finds the next eligible seeker on the waitlist for a given spot and sends them a notification.
+// Returns true if a seeker was notified, false if no match was found or the waitlist is exhausted.
+//
+// afterEntryId: when provided, skips to the seeker *after* that entry — used when cascading
+// through the waitlist after a rejection or timeout.
 export async function notifyNextSeeker(
   spotId: string,
   afterEntryId?: string,
@@ -11,6 +16,8 @@ export async function notifyNextSeeker(
     .single();
   if (!spot) return false;
 
+  // Find all waitlist entries whose class_types include this spot's type,
+  // excluding the poster (they can't claim their own spot), ordered by join time (FIFO)
   const { data: matches } = await supabase
     .from("waitlist_entries")
     .select("*")
@@ -20,6 +27,7 @@ export async function notifyNextSeeker(
 
   if (!matches?.length) return false;
 
+  // Default to the first person in line; if afterEntryId is set, advance one position
   let target = matches[0];
   if (afterEntryId) {
     const idx = matches.findIndex((e) => e.id === afterEntryId);
@@ -27,6 +35,7 @@ export async function notifyNextSeeker(
     target = matches[idx + 1];
   }
 
+  // Build an optional detail line (e.g. "Level 2 · with Sarah M. · 123 Newbury St")
   const details = [
     spot.class_level,
     spot.instructor ? `with ${spot.instructor}` : null,
@@ -54,6 +63,8 @@ export async function notifyNextSeeker(
   return true;
 }
 
+// Marks the current notification as expired (rejected or timed out) and passes
+// the spot to the next seeker in line
 export async function rejectSpot(
   notifId: string,
   spotId: string,
@@ -67,6 +78,8 @@ export async function rejectSpot(
   await notifyNextSeeker(spotId, waitlistEntryId);
 }
 
+// Dev/test utility to manually trigger a timeout on a spot's pending notification,
+// simulating what happens when a seeker's 30-minute claim window runs out
 export async function simulateTimeout(spotId: string): Promise<string> {
   const { data: notif } = await supabase
     .from("notifications")
