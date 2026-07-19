@@ -50,6 +50,8 @@ A peer-to-peer fitness spot exchange. If you can't make a class you signed up fo
 | Frontend | React + TypeScript (Vite) |
 | Backend / Database | Supabase (Postgres + Auth) |
 | Real-time | Supabase Realtime (postgres_changes) |
+| Server-side logic | Postgres functions + triggers (`SECURITY DEFINER`) |
+| Scheduled jobs | pg_cron (notification expiry, every minute) |
 | Routing | React Router v6 |
 | Fonts | Berkshire Swash, Afacad (Google Fonts) |
 
@@ -82,7 +84,13 @@ Both values are found in your Supabase project under **Settings → API**.
 
 ### Database Setup
 
-Paste the contents of `schema.sql` into the **Supabase SQL Editor** and run it.
+In the **Supabase SQL Editor**:
+
+1. Run [`schema.sql`](schema.sql) to create the tables, indexes, RLS policies, and the signup trigger.
+2. Enable the `pg_cron` extension (**Database → Extensions**).
+3. Run the migrations in [`migrations/`](migrations/) in order (`01` → `05`). These add the matching/claim/expiry Postgres functions, triggers, and the `pg_cron` job. They are idempotent and safe to re-run.
+
+> `schema.sql` reflects the current table/RLS shape; `migrations/` holds the server-side logic and the incremental history of how it got there.
 
 ### Run Locally
 
@@ -90,15 +98,27 @@ Paste the contents of `schema.sql` into the **Supabase SQL Editor** and run it.
 npm run dev
 ```
 
+### Testing
+
+Unit tests (Vitest) cover the matching decision logic:
+
+```bash
+npm test          # run once
+npm run test:watch
+```
+
 ---
 
 ## Project Structure
 
 ```
+schema.sql                      # full database DDL (tables, RLS, triggers, functions)
+migrations/                     # incremental SQL migrations (01–05)
 src/
 ├── lib/
 │   ├── supabase.ts
-│   └── matching.ts
+│   ├── matching.ts             # pure reference impl of the SQL matcher (for tests only)
+│   └── matching.test.ts        # Vitest unit tests for the matching decision
 ├── types/
 │   └── index.ts
 ├── components/
@@ -115,20 +135,85 @@ src/
     └── AccountPage.tsx
 ```
 
+> **Note:** `src/lib/matching.ts` is **not** used at runtime — the app matches server-side in Postgres. It's a pure, dependency-free re-expression of `notify_seeker_for_spot()` kept only as an executable spec for the unit tests (`npm test`).
+
 ---
 
 ## How It Works
 
 1. A user signs up for a fitness class but later can't make it
 2. They post their spot on No Show with the class details and any booking info needed to attend
-3. The matching engine scans the waitlist for the best match based on class type, level, and time preference
+3. Posting the spot fires a Postgres `AFTER INSERT` trigger that scans the waitlist **server-side** for the best match (class type, level, and time of day, falling back to class-type-only) and inserts a notification for the matched seeker
 4. The matched seeker receives a real-time notification with a 30-minute countdown to claim the spot
-5. If they claim it, they receive the full booking info instantly
-6. If they don't claim it or click "Not Interested," the spot moves to the next person in the queue automatically
+5. If they claim it, an atomic `claim_spot()` function marks the spot claimed and returns the full booking info — only one seeker can win the claim, even under a simultaneous race
+6. If they click "Not Interested" (`reject_and_advance()`) or the 30-minute window lapses (a `pg_cron` job), the offer is expired and the spot is passed to the next eligible seeker automatically
+
+## Architecture
+
+All matching, notification creation, claiming, and expiry run **inside the database** as `SECURITY DEFINER` Postgres functions — never in the browser. This keeps the queue tamper-proof (the client can't fabricate notifications or force-claim a spot) and lets Row Level Security stay locked down to least privilege. The React app only performs owner-scoped reads/writes and calls the functions via `supabase.rpc(...)`.
+
+### Server-side functions
+
+| Function | Type | Purpose |
+|---|---|---|
+| `handle_new_user()` | trigger on `auth.users` | Creates a `profiles` row on signup |
+| `spot_time_of_day(ts)` | helper | Buckets a class time into morning / afternoon / evening |
+| `notify_seeker_for_spot(spot_id)` | `SECURITY DEFINER` | Core matcher: finds the next eligible seeker (exact → fallback, FIFO, skipping anyone already offered the spot) and inserts one pending notification |
+| `spots_notify_on_insert()` | `AFTER INSERT` trigger on `spots` | Runs the matcher when a spot is posted |
+| `notify_available_spots_for_me()` | `SECURITY DEFINER` RPC | When a seeker joins/updates the waitlist, matches already-available spots |
+| `claim_spot(spot, notif, entry)` | `SECURITY DEFINER` RPC | Atomically claims a spot (only if still available), marks the notification claimed, bumps the seeker to the back of the queue, and returns booking info |
+| `reject_and_advance(notif)` | `SECURITY DEFINER` RPC | "Not Interested": expires the offer and advances the queue |
+| `expire_stale_notifications()` | `pg_cron`, every minute | Expires pending offers older than 30 minutes and advances the queue |
+
+The client-side 30-minute countdown is now **purely a display**; the authoritative expiry is the `pg_cron` job.
+
+### Data flow: post → match → notify → claim / expire
+
+```mermaid
+flowchart TD
+    subgraph Client["Browser (React)"]
+        P[Poster posts a spot]
+        SJ[Seeker joins / updates waitlist]
+        INBOX[Notification inbox<br/>live 30-min countdown]
+        CLAIM[Claim Spot]
+        REJECT[Not Interested]
+    end
+
+    subgraph DB["Supabase Postgres"]
+        SP[(spots)]
+        WL[(waitlist_entries)]
+        NT[(notifications)]
+        M[["notify_seeker_for_spot()"]]
+        TRG{{"AFTER INSERT trigger"}}
+        AVAIL[["notify_available_spots_for_me()"]]
+        CS[["claim_spot()"]]
+        RA[["reject_and_advance()"]]
+        CRON{{"pg_cron: expire_stale_notifications()<br/>every minute"}}
+    end
+
+    P -->|INSERT| SP
+    SP --> TRG --> M
+    SJ -->|INSERT| WL
+    SJ -->|rpc| AVAIL --> M
+    M -->|best match: INSERT pending| NT
+    NT -->|Realtime| INBOX
+    INBOX --> CLAIM
+    INBOX --> REJECT
+    CLAIM -->|rpc| CS
+    CS -->|status=claimed, claimed_by set| SP
+    CS -->|status=claimed + booking info| NT
+    REJECT -->|rpc| RA
+    RA -->|status=expired| NT
+    RA -.->|advance queue| M
+    CRON -->|pending over 30 min: status=expired| NT
+    CRON -.->|advance queue| M
+```
 
 ## Database Schema
 
-No Show uses four tables in Supabase Postgres. Row Level Security (RLS) is enabled on all tables to ensure users can only access data they are permitted to see or modify.
+No Show uses four tables in Supabase Postgres. Row Level Security (RLS) is enabled on all tables and locked down to **least privilege**: the client may only read/write its own rows. Every cross-user write (creating a notification for someone else, claiming a spot, advancing the queue) goes through a `SECURITY DEFINER` function that bypasses RLS in a controlled way — so the permissive policies the browser used to need have been removed.
+
+The full DDL lives in [`schema.sql`](schema.sql); incremental changes are in [`migrations/`](migrations/).
 
 ---
 
@@ -165,15 +250,18 @@ Stores every class spot that has been posted. Each spot belongs to the user who 
 | class_level | text | Optional |
 | instructor | text | Optional |
 | claim_info | text | Revealed only after claiming |
-| status | text | `available` or `claimed` |
+| status | text | `available` or `claimed` (check constraint) |
+| claimed_by | uuid | Seeker who claimed the spot (references `profiles`) |
 | created_at | timestamptz | Auto-set |
+
+A check constraint enforces that a spot is posted **at least 1 hour before** `scheduled_at` (`scheduled_at >= created_at + interval '1 hour'`).
 
 **Policies**
 
-- **Readable by all authenticated users** — Any logged-in user needs to be able to see available spots. The matching engine also reads spots to check for existing availability when a seeker joins the waitlist.
-- **Insertable by authenticated users** — Any user can post a spot since there are no fixed roles — the same person can be a poster or a seeker depending on the situation.
-- **Updatable by authenticated users** — Both the poster (managing their listing) and a seeker (marking a spot as claimed) need update access. Restricting updates to only the poster would break the claim flow.
-- **Deletable by owner only** — Only the user who posted the spot can delete it, preventing others from removing listings they don't own.
+- **Readable by all authenticated users** — Any logged-in user needs to be able to see available spots.
+- **Insertable by owner only** — A user can post a spot, but only as themselves (`auth.uid() = poster_id`).
+- **No direct UPDATE policy** — Claiming is the only update a spot receives, and it happens exclusively through the `claim_spot()` function. There is no client-facing UPDATE policy, so the browser cannot flip a spot's status directly.
+- **Deletable by owner only** — Only the user who posted the spot can delete it.
 
 ---
 
@@ -190,11 +278,13 @@ Stores each user's waitlist preferences. A user can have one active entry specif
 | time_preferences | text[] | morning / afternoon / evening |
 | created_at | timestamptz | Used to determine queue position |
 
+A unique index enforces **one waitlist entry per user**.
+
 **Policies**
 
-- **Readable by all authenticated users** — The matching engine runs in the browser as the currently logged-in poster. It needs to query all waitlist entries to find matching seekers. Without this, the query would return no results and no notifications would ever be sent.
-- **Insertable by owner only** — A user can only create a waitlist entry for themselves, preventing someone from signing others up without their knowledge.
-- **Updatable by owner only** — Only the seeker can update their own preferences or have their queue position adjusted (e.g. bumped to the back after claiming a spot).
+- **Readable by owner only** — Matching no longer runs in the browser, so the client never needs to read anyone else's entry. The `SECURITY DEFINER` matching functions read the whole waitlist server-side; the client can only see its own row.
+- **Insertable by owner only** — A user can only create a waitlist entry for themselves.
+- **Updatable by owner only** — Only the seeker can update their own preferences. (The queue-position bump after a claim is done by `claim_spot()`.)
 - **Deletable by owner only** — A user can only remove their own waitlist entry.
 
 ---
@@ -216,10 +306,47 @@ Created by the matching engine when a seeker is found for a spot. Represents a p
 **Policies**
 
 - **Readable by recipient only** — A seeker should only see their own notifications. Showing one user's notifications to another would expose private spot details and booking info.
-- **Insertable by authenticated users** — The matching engine, running as the posting user, needs to insert a notification for a different user (the matched seeker). Restricting inserts to owner-only would break this entirely.
-- **Updatable by authenticated users** — Both the seeker (claiming or rejecting) and the system (expiring a notification when the timer runs out) need to update notification status. The seeker is not always the one triggering the update.
-- **Deletable by recipient only** — Only the seeker can delete their own notifications, keeping the inbox management personal and preventing others from clearing someone else's inbox.
+- **No client INSERT policy** — Notifications are created **only** by the `SECURITY DEFINER` matching functions (`notify_seeker_for_spot()` and friends). The browser can never insert one.
+- **No client UPDATE policy** — Status changes (claim / expire) happen **only** through `claim_spot()`, `reject_and_advance()`, and the expiry `pg_cron` job. The client cannot mark a notification claimed or expired directly.
+- **Deletable by recipient only** — Only the seeker can delete their own notifications, keeping inbox management personal.
+
+## Lifecycles
+
+### Spot lifecycle
+
+A spot is `available` when posted and becomes `claimed` only via `claim_spot()`. The poster can delete a listing while it is still available.
+
+```mermaid
+stateDiagram-v2
+    [*] --> available: poster INSERTs spot (trigger notifies first match)
+    available --> claimed: claim_spot() — atomic, sets claimed_by
+    available --> [*]: poster deletes listing
+    claimed --> [*]
+```
+
+### Notification lifecycle
+
+A notification is created `pending`. The seeker can claim it (→ `claimed`) or pass (→ `expired`); if the 30-minute window lapses, `pg_cron` expires it. Either way of leaving `pending` re-runs the matcher to offer the spot to the next seeker.
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: notify_seeker_for_spot() creates offer
+    pending --> claimed: claim_spot()
+    pending --> expired: reject_and_advance() or pg_cron (> 30 min)
+    claimed --> [*]
+    expired --> [*]
+    note right of expired
+        Expiry/rejection re-runs
+        notify_seeker_for_spot(), creating a
+        NEW pending offer for the next
+        eligible seeker in the queue.
+    end note
+    note right of pending
+        The recipient may delete a
+        notification in any state.
+    end note
+```
 
 ## Notes
 
-This project was built as a portfolio piece. SMS notifications and background scheduling are intentionally simulated in the UI — the 30-minute countdown runs client-side and auto-advances the queue on expiry. In production these would be handled by a scheduled background job and real SMS notifications via Twilio. In production, studio address fields would integrate with the Google Maps Places API for address autocomplete and validation. This would also enable location-based filtering on the waitlist queue, so seekers could be matched to spots within a preferred distance rather than across all locations.
+This project was built as a portfolio piece. Notification expiry runs server-side via a `pg_cron` job that sweeps every minute; the client-side countdown is only a display. SMS delivery is not wired up — in production the in-app notification would be paired with real SMS via Twilio. Studio address fields would integrate with the Google Maps Places API for address autocomplete and validation, which would also enable location-based filtering on the waitlist queue, so seekers could be matched to spots within a preferred distance rather than across all locations.
