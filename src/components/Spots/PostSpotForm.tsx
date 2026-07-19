@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../../lib/supabase";
-import { notifyNextSeeker } from "../../lib/matching";
 
 // Options for the class type and level dropdowns
 const CLASS_TYPES = [
@@ -89,33 +88,29 @@ export default function PostSpotForm({ posterId }: { posterId: string }) {
       ? `${bookingLine}\n${claimInfo.trim()}`
       : bookingLine;
 
-    const { data, error } = await supabase
-      .from("spots")
-      .insert({
-        poster_id: posterId,
-        title: className.trim(),
-        class_type: classType,
-        studio,
-        location: location.trim() || null,
-        scheduled_at: scheduledAt,
-        class_level: classLevel || null,
-        instructor: instructor.trim() || null,
-        claim_info: fullClaimInfo,
-      })
-      .select()
-      .single();
+    const { error } = await supabase.from("spots").insert({
+      poster_id: posterId,
+      title: className.trim(),
+      class_type: classType,
+      studio,
+      location: location.trim() || null,
+      scheduled_at: scheduledAt,
+      class_level: classLevel || null,
+      instructor: instructor.trim() || null,
+      claim_info: fullClaimInfo,
+    });
 
     if (error) {
       setStatus(`Error: ${error.message}`);
       return;
     }
 
-    // After inserting, attempt to notify the first matching seeker
-    const notified = await notifyNextSeeker(data.id);
+    // Matching + notifying the next seeker now happens server-side via an AFTER
+    // INSERT trigger on the spots table (migrations/01_server_side_matching.sql).
+    // The client can't read the matched seeker's notification (recipient-only), so
+    // we no longer report whether a specific seeker was notified.
     setStatus(
-      notified
-        ? "✅ Spot posted! First matched seeker has been notified."
-        : "✅ Spot posted! No matching seekers on the waitlist yet.",
+      "✅ Spot posted! The next matching seeker on the waitlist will be notified.",
     );
 
     setStudio("");

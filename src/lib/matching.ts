@@ -1,5 +1,24 @@
 import { supabase } from "./supabase";
 
+// ---------------------------------------------------------------------------
+// PARTIALLY SUPERSEDED BY THE DATABASE.
+//
+// The "new spot posted -> notify best match" path now runs server-side via an
+// AFTER INSERT trigger on the spots table (migrations/01_server_side_matching.sql),
+// and PostSpotForm no longer calls into this file. That server function also does
+// richer matching (class_type + level + time-of-day, falling back to class-type-only)
+// than the class-type-only logic below.
+//
+// This file is KEPT only because two flows are not yet handled server-side and
+// still insert notifications from the browser:
+//   * WaitlistForm — when a seeker joins the waitlist, match already-available spots.
+//   * NotificationInbox — reject / 30-min timeout cascade to the next seeker (rejectSpot).
+//
+// These should move to the DB (a waitlist_entries trigger and a reject-and-advance
+// RPC — see the notes at the bottom of the migration) before RLS is tightened.
+// Once they do, this file has no pure, unit-testable logic left and can be deleted.
+// ---------------------------------------------------------------------------
+
 // Finds the next eligible seeker on the waitlist for a given spot and sends them a notification.
 // Returns true if a seeker was notified, false if no match was found or the waitlist is exhausted.
 //
