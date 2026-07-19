@@ -125,6 +125,8 @@ create table if not exists public.spots (
   -- 'available' when posted, 'claimed' once a seeker takes it.
   status       text not null default 'available'
                  check (status in ('available', 'claimed')),
+  -- Seeker who claimed the spot. Added in migrations/02_atomic_claim.sql.
+  claimed_by   uuid references public.profiles (id),
   created_at   timestamptz not null default now()
 );
 

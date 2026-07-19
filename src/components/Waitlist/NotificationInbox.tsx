@@ -70,6 +70,8 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
   const [notifs, setNotifs] = useState<Notification[]>([]);
   // Stores full spot data for claimed notifications so booking info can be shown
   const [claimedSpots, setClaimedSpots] = useState<Record<string, Spot>>({});
+  // Per-notification message shown when a claim loses the race (spot already taken)
+  const [claimErrors, setClaimErrors] = useState<Record<string, string>>({});
 
   const fetchNotifs = () =>
     supabase
@@ -100,32 +102,39 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
     };
   }, [seekerId]);
 
-  // Marks the notification and spot as claimed, bumps the waitlist entry timestamp
-  // (resetting its queue position), then fetches the full spot to reveal booking info
+  // Claims the spot atomically via the claim_spot() DB function (migrations/
+  // 02_atomic_claim.sql). The function marks the spot + notification claimed and
+  // bumps the waitlist entry in one transaction, but only if the spot is still
+  // available — so if two seekers claim at once, exactly one wins. The winner gets
+  // the spot row back (with booking info); the loser gets an empty result.
   const claim = async (
     notifId: string,
     spotId: string,
     waitlistEntryId: string,
   ) => {
-    // updates the notification to show claimed
-    await supabase
-      .from("notifications")
-      .update({ status: "claimed" })
-      .eq("id", notifId); 
-    // mark the spot as claimed
-    await supabase.from("spots").update({ status: "claimed" }).eq("id", spotId); 
-    // Bumping created_at resets the entry's position so it goes to the back of the queue next time (sorted by oldest first)
-    await supabase
-      .from("waitlist_entries")
-      .update({ created_at: new Date().toISOString() })
-      .eq("id", waitlistEntryId);
-    // fetch spot details and refresh
-    const { data: spot } = await supabase
-      .from("spots")
-      .select("*")
-      .eq("id", spotId)
-      .single();
-    if (spot) setClaimedSpots((prev) => ({ ...prev, [spotId]: spot }));
+    const { data, error } = await supabase.rpc("claim_spot", {
+      p_spot_id: spotId,
+      p_notif_id: notifId,
+      p_waitlist_entry_id: waitlistEntryId,
+    });
+
+    if (error) {
+      setClaimErrors((prev) => ({ ...prev, [notifId]: error.message }));
+      return;
+    }
+
+    // Empty result → the spot was already taken by someone else.
+    const spot = (data as Spot[] | null)?.[0];
+    if (!spot) {
+      setClaimErrors((prev) => ({
+        ...prev,
+        [notifId]: "This spot was just claimed by someone else.",
+      }));
+      fetchNotifs();
+      return;
+    }
+
+    setClaimedSpots((prev) => ({ ...prev, [spotId]: spot }));
     fetchNotifs();
   };
 
@@ -363,6 +372,13 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
                   ✕ Not Interested
                 </button>
               </div>
+            )}
+
+            {/* Shown when this seeker lost the claim race */}
+            {claimErrors[n.id] && (
+              <p style={{ color: "#ef4444", fontSize: 13, marginTop: 12 }}>
+                {claimErrors[n.id]}
+              </p>
             )}
           </div>
         ))}

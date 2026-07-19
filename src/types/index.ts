@@ -22,6 +22,7 @@ export interface Spot {
   instructor: string | null;
   claim_info: string | null; // booking details revealed only after a seeker claims
   status: "available" | "claimed";
+  claimed_by: string | null; // seeker who claimed the spot (references profiles.id)
   created_at: string;
 }
 
