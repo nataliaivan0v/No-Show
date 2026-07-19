@@ -113,7 +113,6 @@ npm run test:watch
 
 ```
 schema.sql                      # full database DDL (tables, RLS, triggers, functions)
-migrations/                     # incremental SQL migrations (01–05)
 src/
 ├── lib/
 │   ├── supabase.ts
