@@ -85,13 +85,22 @@ Both values are found in your Supabase project under **Settings → API**.
 
 ### Database Setup
 
-In the **Supabase SQL Editor**:
+The entire database lives in a single self-contained [`schema.sql`](schema.sql) — tables, indexes, RLS policies, functions, triggers, extensions, and the `pg_cron` job.
 
-1. Run [`schema.sql`](schema.sql) to create the tables, indexes, RLS policies, and the signup trigger.
-2. Enable the `pg_cron` extension (**Database → Extensions**).
-3. Run the migrations in [`migrations/`](migrations/) in order (`01` → `05`). These add the matching/claim/expiry Postgres functions, triggers, and the `pg_cron` job. They are idempotent and safe to re-run.
+1. **(Privileged extensions first)** In **Database → Extensions**, enable **`pg_cron`** and **`pg_net`**. These require `shared_preload_libraries` and can't always be created from plain SQL on a fresh project, so toggle them in the dashboard first. (`cube`, `earthdistance`, `pgcrypto` are created by `schema.sql` itself.)
+2. **Run the schema.** Paste all of [`schema.sql`](schema.sql) into the **SQL Editor** and run it, top to bottom. It's idempotent, so it's safe to re-run.
+3. **Set the edge function secrets** (used by the Supabase Edge Functions, not the DB). See [`docs/EMAIL_SETUP.md`](docs/EMAIL_SETUP.md) for the email flow; the full set:
+   ```bash
+   npx supabase secrets set \
+     ANTHROPIC_API_KEY=sk-ant-xxxx \
+     RESEND_API_KEY=re_xxxx \
+     APP_URL="https://your-app-url" \
+     GEOCODER_USER_AGENT="no-show/1.0 (contact: you@example.com)"
+   # optional: RESEND_FROM="No Show <notify@yourdomain.com>"
+   ```
+   Then deploy the functions: `npx supabase functions deploy --use-api`.
 
-> `schema.sql` reflects the current table/RLS shape; `migrations/` holds the server-side logic and the incremental history of how it got there.
+> **Regenerating from a live DB:** `npx supabase db dump --schema public -f schema.sql` re-captures tables/columns/RLS/functions/triggers, but a plain dump **omits** the `EXTENSIONS` block (top) and the `PG_CRON SCHEDULE` block (bottom). Both are clearly bannered in `schema.sql` — re-add them after any re-dump so the file stays self-contained.
 
 ### Run Locally
 
@@ -241,7 +250,7 @@ Setup steps (secrets + creating the webhook) are in [`docs/EMAIL_SETUP.md`](docs
 
 No Show uses four tables in Supabase Postgres. Row Level Security (RLS) is enabled on all tables and locked down to **least privilege**: the client may only read/write its own rows. Every cross-user write (creating a notification for someone else, claiming a spot, advancing the queue) goes through a `SECURITY DEFINER` function that bypasses RLS in a controlled way — so the permissive policies the browser used to need have been removed.
 
-The full DDL lives in [`schema.sql`](schema.sql); incremental changes are in [`migrations/`](migrations/).
+The full, self-contained DDL — tables, RLS, functions, triggers, extensions, and the `pg_cron` job — lives in [`schema.sql`](schema.sql).
 
 ---
 
