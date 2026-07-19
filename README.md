@@ -52,6 +52,7 @@ A peer-to-peer fitness spot exchange. If you can't make a class you signed up fo
 | Real-time | Supabase Realtime (postgres_changes) |
 | Server-side logic | Postgres functions + triggers (`SECURITY DEFINER`) |
 | Scheduled jobs | pg_cron (notification expiry, every minute) |
+| Email | Supabase Edge Function (Deno) + Resend, via a Database Webhook |
 | Routing | React Router v6 |
 | Fonts | Berkshire Swash, Afacad (Google Fonts) |
 
@@ -207,6 +208,34 @@ flowchart TD
     CRON -->|pending over 30 min: status=expired| NT
     CRON -.->|advance queue| M
 ```
+
+### Email notifications
+
+Whenever a notification row is created, the matched seeker also gets an email. This runs entirely server-side and is decoupled from matching:
+
+1. A **Supabase Database Webhook** fires on every `INSERT` into `notifications`.
+2. The webhook calls the **`send-notification-email` Edge Function** ([`supabase/functions/send-notification-email/`](supabase/functions/send-notification-email/)) with the standard webhook payload (the new row under `record`).
+3. The function uses the **service role key** to look up the spot (`spot_id`) and the seeker's email (`auth.admin.getUserById(seeker_id)`).
+4. It sends the email via the **Resend API** — subject like *"A spot just opened: {class name} at {studio}"*, with the class details, studio/location, date/time, and a 30-minute claim reminder plus a link back to the app (`APP_URL`).
+
+```mermaid
+sequenceDiagram
+    participant DB as Postgres (notifications)
+    participant WH as Database Webhook
+    participant EF as send-notification-email (Edge Function)
+    participant RS as Resend
+    participant U as Seeker's inbox
+
+    DB->>WH: INSERT (new notification row)
+    WH->>EF: POST webhook payload (record)
+    EF->>DB: fetch spot (no claim_info) + seeker email (service role)
+    EF->>RS: send email (class details, 30-min reminder, app link)
+    RS-->>U: email delivered
+```
+
+**Booking secrets are never emailed.** The function explicitly selects only non-secret spot fields and never reads `claim_info` — door codes and check-in details are revealed only in the app after the seeker claims the spot. Email is also **best-effort**: any failure (missing email, Resend error) is logged and the function still returns `200`, so a bad email can never block matching or cause the webhook to retry forever.
+
+Setup steps (secrets + creating the webhook) are in [`docs/EMAIL_SETUP.md`](docs/EMAIL_SETUP.md).
 
 ## Database Schema
 

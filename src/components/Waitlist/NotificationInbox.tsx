@@ -4,7 +4,13 @@ import { supabase } from "../../lib/supabase";
 import { type Notification, type NotifStatus, type Spot } from "../../types";
 
 // How long a seeker has to claim a spot before it expires and moves to the next person
-const EXPIRY_MS = 30 * 60 * 1000;
+const EXPIRY_MS = 2 * 60 * 1000;
+
+// True once a notification's 30-min window has elapsed, computed purely client-side
+// from created_at. Used to hide the claim/reject buttons the instant time runs out,
+// without waiting for the server-side cron to flip the status.
+const isTimeUp = (createdAt: string) =>
+  Date.now() >= new Date(createdAt).getTime() + EXPIRY_MS;
 
 // Text color and background color for each notification status badge
 const statusColor: Record<NotifStatus, string> = {
@@ -71,6 +77,17 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
   const [claimedSpots, setClaimedSpots] = useState<Record<string, Spot>>({});
   // Per-notification message shown when a claim loses the race (spot already taken)
   const [claimErrors, setClaimErrors] = useState<Record<string, string>>({});
+  // IDs whose countdown has hit zero this session — lets us flip a still-'pending'
+  // row to an expired display immediately, before the server/cron catches up.
+  const [expiredIds, setExpiredIds] = useState<Set<string>>(new Set());
+
+  const markExpired = (id: string) =>
+    setExpiredIds((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
 
   const fetchNotifs = () =>
     supabase
@@ -80,20 +97,48 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
       .order("created_at", { ascending: false })
       .then(({ data }) => setNotifs(data ?? []));
 
-  // Initial fetch + realtime subscription so the inbox updates without a page refresh
+  // Initial fetch + realtime subscription so the inbox updates without a page refresh.
+  // We listen for INSERT, UPDATE and DELETE on this seeker's own rows and patch local
+  // state directly from the payload, so status changes (expired via cron, claimed,
+  // queue advancement) reflect immediately without a refetch. RLS (notifications are
+  // recipient-only SELECT) plus the seeker_id filter means we only ever receive our
+  // own rows.
   useEffect(() => {
     fetchNotifs();
+    const filter = `seeker_id=eq.${seekerId}`;
     const channel = supabase
-      .channel("notif-inbox")
+      .channel(`notif-inbox-${seekerId}`)
       .on(
         "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "notifications",
-          filter: `seeker_id=eq.${seekerId}`,
+        { event: "INSERT", schema: "public", table: "notifications", filter },
+        (payload) => {
+          const row = payload.new as Notification;
+          setNotifs((prev) =>
+            prev.some((n) => n.id === row.id) ? prev : [row, ...prev],
+          );
         },
-        fetchNotifs,
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "notifications", filter },
+        (payload) => {
+          const row = payload.new as Notification;
+          setNotifs((prev) =>
+            prev.map((n) => (n.id === row.id ? { ...n, ...row } : n)),
+          );
+        },
+      )
+      .on(
+        "postgres_changes",
+        // DELETE payloads only carry the primary key unless the table uses REPLICA
+        // IDENTITY FULL; in-app deletes are already removed optimistically, so this
+        // just keeps other sessions in sync when it does fire.
+        { event: "DELETE", schema: "public", table: "notifications", filter },
+        (payload) => {
+          const oldRow = payload.old as { id?: string };
+          if (oldRow?.id)
+            setNotifs((prev) => prev.filter((n) => n.id !== oldRow.id));
+        },
       )
       .subscribe();
     return () => {
@@ -150,12 +195,13 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
     setClaimedSpots({});
   };
 
-  // Expiry is now enforced server-side by a pg_cron job (migrations/03_expiry_cron.sql),
-  // which marks the notification expired and advances the queue. The countdown is
-  // purely a display; when it hits zero we just re-sync from the DB (realtime will
-  // also push the change once cron runs).
-  const handleExpire = () => {
-    fetchNotifs();
+  // Expiry is enforced server-side by a pg_cron job (migrations/03_expiry_cron.sql),
+  // which marks the notification expired and advances the queue. When the local
+  // countdown hits zero we don't wait for that: we mark the row expired in local
+  // state so the buttons hide and the badge flips immediately. Realtime reconciles
+  // with the authoritative status once cron runs.
+  const handleExpire = (id: string) => {
+    markExpired(id);
   };
 
   return (
@@ -241,15 +287,24 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
           margin: "0 auto",
         }}
       >
-        {notifs.map((n) => (
+        {notifs.map((n) => {
+          // Flip a still-'pending' row to an expired display the moment its timer is
+          // up (recorded in expiredIds when the countdown fires, or computed from
+          // created_at on mount) so the buttons vanish without waiting on the server.
+          const effStatus: NotifStatus =
+            n.status === "pending" &&
+            (expiredIds.has(n.id) || isTimeUp(n.created_at))
+              ? "expired"
+              : n.status;
+          return (
           <div
             key={n.id}
             style={{
               background: "#fff",
-              border: `1.5px solid ${statusColor[n.status]}`,
+              border: `1.5px solid ${statusColor[effStatus]}`,
               borderRadius: 16,
               padding: "20px 24px",
-              borderLeft: `5px solid ${statusColor[n.status]}`,
+              borderLeft: `5px solid ${statusColor[effStatus]}`,
               textAlign: "center",
               position: "relative",
             }}
@@ -293,13 +348,13 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
                 justifyContent: "center",
                 gap: 12,
                 flexWrap: "wrap",
-                marginBottom: n.status === "pending" ? 14 : 0,
+                marginBottom: effStatus === "pending" ? 14 : 0,
               }}
             >
               <span
                 style={{
-                  background: statusBg[n.status],
-                  color: statusColor[n.status],
+                  background: statusBg[effStatus],
+                  color: statusColor[effStatus],
                   fontSize: 12,
                   fontWeight: 700,
                   padding: "3px 10px",
@@ -307,10 +362,13 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
                   textTransform: "capitalize",
                 }}
               >
-                ● {n.status}
+                ● {effStatus}
               </span>
-              {n.status === "pending" && (
-                <Countdown createdAt={n.created_at} onExpire={handleExpire} />
+              {effStatus === "pending" && (
+                <Countdown
+                  createdAt={n.created_at}
+                  onExpire={() => handleExpire(n.id)}
+                />
               )}
             </div>
 
@@ -349,7 +407,7 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
               </div>
             )}
 
-            {n.status === "pending" && (
+            {effStatus === "pending" && (
               <div
                 style={{ display: "flex", gap: 10, justifyContent: "center" }}
               >
@@ -379,7 +437,8 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
               </p>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
