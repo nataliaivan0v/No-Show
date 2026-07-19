@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../../lib/supabase";
-import { notifyNextSeeker } from "../../lib/matching";
 import { type WaitlistEntry } from "../../types";
 
 // Options for the preference dropdowns/pills
@@ -92,15 +91,10 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       return;
     }
 
-    // After joining, check if any matching spots are already available and notify immediately
-    const { data: existingSpots } = await supabase
-      .from("spots")
-      .select("*")
-      .eq("status", "available")
-      .in("class_type", selectedTypes)
-      .neq("poster_id", seekerId); // don't match the seeker to their own posted spot
-
-    if (existingSpots?.length) await notifyNextSeeker(existingSpots[0].id);
+    // Matching against already-available spots now runs server-side in a SECURITY
+    // DEFINER function (migrations/05_tighten_rls.sql), so the client no longer reads
+    // other users' waitlist entries or inserts notifications directly.
+    await supabase.rpc("notify_available_spots_for_me");
 
     setExisting(data);
     setEditing(false);
@@ -130,6 +124,9 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       setStatus(`Error: ${error.message}`);
       return;
     }
+
+    // Updated preferences may now match spots that are already available.
+    await supabase.rpc("notify_available_spots_for_me");
 
     setExisting(data);
     setEditing(false);

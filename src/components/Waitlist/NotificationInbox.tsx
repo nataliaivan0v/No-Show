@@ -2,7 +2,6 @@
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "../../lib/supabase";
 import { type Notification, type NotifStatus, type Spot } from "../../types";
-import { rejectSpot } from "../../lib/matching";
 
 // How long a seeker has to claim a spot before it expires and moves to the next person
 const EXPIRY_MS = 30 * 60 * 1000;
@@ -362,9 +361,9 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
                 </button>
                 <button
                   onClick={() =>
-                    rejectSpot(n.id, n.spot_id, n.waitlist_entry_id).then(
-                      fetchNotifs,
-                    )
+                    supabase
+                      .rpc("reject_and_advance", { p_notif_id: n.id })
+                      .then(fetchNotifs)
                   }
                   style={rejectBtnStyle}
                 >

@@ -107,9 +107,9 @@ create trigger on_auth_user_created
 --   * PostSpotForm.tsx     -> insert { poster_id, title, class_type, studio, location,
 --                              scheduled_at, class_level, instructor, claim_info }
 --   * WaitlistForm.tsx     -> select where status = 'available' and class_type in (...)
---   * matching.ts          -> reads class_type, class_level, instructor, location,
---                              studio, title, scheduled_at, poster_id
---   * NotificationInbox.tsx / Dashboard.tsx -> update status = 'claimed'
+--   * notify_seeker_for_spot() (definer) -> reads class_type, class_level, instructor,
+--                              location, studio, title, scheduled_at, poster_id
+--   * claim_spot() (definer) -> sets status = 'claimed', claimed_by
 -- =============================================================================
 create table if not exists public.spots (
   id           uuid primary key default gen_random_uuid(),
@@ -159,15 +159,9 @@ create policy "spots: insert (authenticated)"
   to authenticated
   with check (auth.uid() = poster_id);
 
--- Updatable by authenticated users: both the poster (managing a listing) and a
--- seeker (marking a spot claimed) need update access, so this is intentionally open
--- to any authenticated user rather than owner-only.
-create policy "spots: update (authenticated)"
-  on public.spots
-  for update
-  to authenticated
-  using (true)
-  with check (true);
+-- NO update policy (tightened in migrations/05_tighten_rls.sql). Claiming is the only
+-- spot update, and it happens exclusively through claim_spot() (SECURITY DEFINER). If
+-- a poster "edit listing" feature is added later, add a poster-scoped UPDATE policy.
 
 -- Deletable by owner only: only the poster may delete their own listing.
 create policy "spots: delete own"
@@ -214,13 +208,14 @@ create index if not exists waitlist_entries_class_types_idx
 
 alter table public.waitlist_entries enable row level security;
 
--- Readable by all authenticated users: matching runs in the browser as the posting
--- user and must query every waitlist entry to find matching seekers.
-create policy "waitlist_entries: read (authenticated)"
+-- Readable by OWNER ONLY (tightened in migrations/05_tighten_rls.sql). Matching now
+-- runs in SECURITY DEFINER functions that bypass RLS, so the browser no longer needs
+-- to read other users' waitlist entries.
+create policy "waitlist_entries: select own"
   on public.waitlist_entries
   for select
   to authenticated
-  using (true);
+  using (auth.uid() = seeker_id);
 
 -- Insertable by owner only: a user may only add a waitlist entry for themselves.
 create policy "waitlist_entries: insert own"
@@ -257,10 +252,10 @@ create policy "waitlist_entries: delete own"
 --   * src/types/index.ts   -> Notification { id, seeker_id, spot_id,
 --                              waitlist_entry_id, message, status, created_at }
 --                              NotifStatus = "pending" | "claimed" | "expired"
---   * matching.ts          -> insert { seeker_id, spot_id, waitlist_entry_id,
---                              message, status: 'pending' }; update status='expired'
---   * NotificationInbox.tsx -> select where seeker_id = ...; update status='claimed';
---                              delete; realtime subscription on this table
+--   * notify_seeker_for_spot() (definer) -> insert { seeker_id, spot_id,
+--                              waitlist_entry_id, message, status: 'pending' }
+--   * claim_spot / reject_and_advance / expiry cron (definer) -> update status
+--   * NotificationInbox.tsx -> select where seeker_id = ...; delete; realtime sub
 -- =============================================================================
 create table if not exists public.notifications (
   id                uuid primary key default gen_random_uuid(),
@@ -290,23 +285,10 @@ create policy "notifications: read own"
   to authenticated
   using (auth.uid() = seeker_id);
 
--- Insertable by authenticated users: the matching engine runs as the posting user
--- but inserts a notification addressed to a *different* user (the matched seeker),
--- so this cannot be owner-only.
-create policy "notifications: insert (authenticated)"
-  on public.notifications
-  for insert
-  to authenticated
-  with check (true);
-
--- Updatable by authenticated users: both the seeker (claim/reject) and the system
--- (expiry) update status, and the updater is not always the recipient.
-create policy "notifications: update (authenticated)"
-  on public.notifications
-  for update
-  to authenticated
-  using (true)
-  with check (true);
+-- NO insert or update policies (tightened in migrations/05_tighten_rls.sql).
+-- Notifications are only ever inserted by the matching/cascade definer functions and
+-- only ever updated by claim_spot / reject_and_advance / the expiry cron — all
+-- SECURITY DEFINER, all bypassing RLS. The client never writes notifications directly.
 
 -- Deletable by recipient only: only the seeker can clear their own inbox.
 create policy "notifications: delete own"
