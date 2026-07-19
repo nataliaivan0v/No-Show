@@ -127,7 +127,12 @@ create table if not exists public.spots (
                  check (status in ('available', 'claimed')),
   -- Seeker who claimed the spot. Added in migrations/02_atomic_claim.sql.
   claimed_by   uuid references public.profiles (id),
-  created_at   timestamptz not null default now()
+  created_at   timestamptz not null default now(),
+  -- Must be posted at least 1 hour before the class. Added in
+  -- migrations/04_constraints.sql; anchored to created_at (not now()) so it stays
+  -- immutable across later updates.
+  constraint spots_posted_at_least_1h_before
+    check (scheduled_at >= created_at + interval '1 hour')
 );
 
 -- Matching and the waitlist query filter spots by status and class_type.
@@ -199,9 +204,11 @@ create table if not exists public.waitlist_entries (
   created_at       timestamptz not null default now()  -- queue position
 );
 
--- Matching orders by created_at and filters by the class_types array.
-create index if not exists waitlist_entries_seeker_id_idx
+-- One waitlist entry per user. Added in migrations/04_constraints.sql; this unique
+-- index also covers seeker_id lookups (so a separate non-unique index isn't needed).
+create unique index if not exists waitlist_entries_one_per_seeker
   on public.waitlist_entries (seeker_id);
+-- Matching filters by the class_types array.
 create index if not exists waitlist_entries_class_types_idx
   on public.waitlist_entries using gin (class_types);
 
