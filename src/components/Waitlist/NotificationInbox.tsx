@@ -151,9 +151,11 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
     setClaimedSpots({});
   };
 
-  // Called by Countdown when time runs out — rejects the spot so the next seeker can be notified
-  const handleExpire = async (n: Notification) => {
-    await rejectSpot(n.id, n.spot_id, n.waitlist_entry_id);
+  // Expiry is now enforced server-side by a pg_cron job (migrations/03_expiry_cron.sql),
+  // which marks the notification expired and advances the queue. The countdown is
+  // purely a display; when it hits zero we just re-sync from the DB (realtime will
+  // also push the change once cron runs).
+  const handleExpire = () => {
     fetchNotifs();
   };
 
@@ -309,10 +311,7 @@ export default function NotificationInbox({ seekerId }: { seekerId: string }) {
                 ● {n.status}
               </span>
               {n.status === "pending" && (
-                <Countdown
-                  createdAt={n.created_at}
-                  onExpire={() => handleExpire(n)}
-                />
+                <Countdown createdAt={n.created_at} onExpire={handleExpire} />
               )}
             </div>
 
