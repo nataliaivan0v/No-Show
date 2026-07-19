@@ -1,0 +1,13 @@
+# Supabase project config. Per-function settings here PERSIST across deploys —
+# unlike the --no-verify-jwt CLI flag, which only applies to a single deploy.
+project_id = "thafkngwkxohaxtrdzfk"
+
+# Browser-called function: the CORS preflight (OPTIONS) carries no JWT, so the
+# gateway must not verify one or it 401s the preflight before our code runs.
+[functions.parse-booking-screenshot]
+verify_jwt = false
+
+# Called by a Database Webhook (not an end-user), so it also skips JWT verification.
+# Listed here so a future redeploy doesn't silently revert it to verify_jwt = true.
+[functions.send-notification-email]
+verify_jwt = false

@@ -24,6 +24,40 @@ const CLASS_LEVELS = [
   "Advanced",
 ];
 
+// Shape returned by the parse-booking-screenshot edge function. Every field is
+// nullable — the model returns null for anything it couldn't read.
+interface ParsedBooking {
+  studio: string | null;
+  title: string | null;
+  class_type: string | null;
+  scheduled_date: string | null; // YYYY-MM-DD
+  scheduled_time: string | null; // 24h HH:MM
+  location: string | null;
+  class_level: string | null;
+  instructor: string | null;
+}
+
+// Reads a File as base64 WITHOUT the "data:<mime>;base64," prefix (the edge
+// function / Anthropic want the raw base64 payload only).
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Coerce a HH:MM time into the zero-padded form a <input type="time"> expects.
+function normalizeTime(t: string): string {
+  const m = t.match(/^(\d{1,2}):(\d{2})/);
+  return m ? `${m[1].padStart(2, "0")}:${m[2]}` : t;
+}
+
 // Formats a full name as "First L." for display (e.g. "Sarah Mitchell" → "Sarah M.")
 function getNameDisplay(fullName: string): string {
   const parts = fullName.trim().split(" ");
@@ -43,6 +77,9 @@ export default function PostSpotForm({ posterId }: { posterId: string }) {
   const [claimInfo, setClaimInfo] = useState("");
   const [profileName, setProfileName] = useState("");
   const [status, setStatus] = useState("");
+  // Autofill-from-screenshot UI state
+  const [autofilling, setAutofilling] = useState(false);
+  const [autofillMsg, setAutofillMsg] = useState("");
 
   // Fetch the poster's name once on mount so it can be prepended to claim_info
   useEffect(() => {
@@ -124,6 +161,57 @@ export default function PostSpotForm({ posterId }: { posterId: string }) {
     setClaimInfo("");
   };
 
+  // Pre-fill only the fields the model actually returned; anything null is left as
+  // the user had it. class_type / class_level are only applied when they match a
+  // known dropdown option, so a stray value can't leave a select in a broken state.
+  const prefillFromParsed = (p: ParsedBooking) => {
+    if (p.studio) setStudio(p.studio);
+    if (p.title) setClassName(p.title);
+    if (p.location) setLocation(p.location);
+    if (p.scheduled_date) setClassDate(p.scheduled_date);
+    if (p.scheduled_time) setClassTime(normalizeTime(p.scheduled_time));
+    if (p.class_type && CLASS_TYPES.includes(p.class_type))
+      setClassType(p.class_type);
+    if (p.class_level && CLASS_LEVELS.includes(p.class_level))
+      setClassLevel(p.class_level);
+    if (p.instructor) setInstructor(p.instructor);
+  };
+
+  // Read a screenshot, send it to the parse-booking-screenshot edge function, and
+  // pre-fill the form. Never auto-submits; failures leave the form untouched so the
+  // manual path always works.
+  const handleScreenshot = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Clear the input so re-selecting the same file still fires onChange.
+    e.target.value = "";
+    if (!file) return;
+
+    setAutofillMsg("");
+    setAutofilling(true);
+    try {
+      const imageBase64 = await fileToBase64(file);
+      const { data, error } = await supabase.functions.invoke(
+        "parse-booking-screenshot",
+        { body: { imageBase64, mediaType: file.type || "image/png" } },
+      );
+
+      // invoke() sets `error` on any non-2xx (bad image, unparseable output, etc.).
+      if (error || !data || (data as { error?: string }).error) {
+        setAutofillMsg("Couldn't read that one, please fill the form manually.");
+        return;
+      }
+
+      prefillFromParsed(data as ParsedBooking);
+      setAutofillMsg(
+        "✅ Pre-filled from your screenshot — double-check the details before posting.",
+      );
+    } catch {
+      setAutofillMsg("Couldn't read that one, please fill the form manually.");
+    } finally {
+      setAutofilling(false);
+    }
+  };
+
   return (
     <div>
       <h2
@@ -154,6 +242,62 @@ export default function PostSpotForm({ posterId }: { posterId: string }) {
           margin: "0 auto",
         }}
       >
+        {/* Autofill from a booking screenshot — optional shortcut, manual entry
+            below always works regardless of what this does. */}
+        <div
+          style={{
+            borderBottom: "1px solid #f0e8e0",
+            paddingBottom: 20,
+          }}
+        >
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              cursor: autofilling ? "default" : "pointer",
+              background: "#fff3ee",
+              color: "#F35C20",
+              border: "1.5px solid #F35C20",
+              padding: "10px 18px",
+              borderRadius: 100,
+              fontSize: 14,
+              fontFamily: "'Afacad', sans-serif",
+              fontWeight: 600,
+              opacity: autofilling ? 0.6 : 1,
+            }}
+          >
+            📷 Autofill from screenshot
+            <input
+              type="file"
+              accept="image/*"
+              disabled={autofilling}
+              onChange={handleScreenshot}
+              style={{ display: "none" }}
+            />
+          </label>
+          <p style={{ fontSize: 12, color: "#aaa", margin: "8px 0 0" }}>
+            Upload a booking confirmation and we'll try to fill in the details.
+            Double-check the details before posting.
+          </p>
+          {autofilling && (
+            <p style={{ fontSize: 13, color: "#F35C20", margin: "8px 0 0" }}>
+              Reading your screenshot...
+            </p>
+          )}
+          {!autofilling && autofillMsg && (
+            <p
+              style={{
+                fontSize: 13,
+                margin: "8px 0 0",
+                color: autofillMsg.startsWith("✅") ? "#22c55e" : "#ef4444",
+              }}
+            >
+              {autofillMsg}
+            </p>
+          )}
+        </div>
+
         <Field label="Studio Name" required>
           <input
             placeholder="e.g. SoulCycle"
