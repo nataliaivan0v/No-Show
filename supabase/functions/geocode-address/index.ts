@@ -1,9 +1,9 @@
 // Supabase Edge Function: geocode-address
 // -----------------------------------------------------------------------------
-// Thin, browser-callable wrapper over the shared Nominatim geocoder. The client
-// calls this once at write time (posting a spot, saving a waitlist entry), gets
-// back { lat, lng }, and stores the coordinates. Geocoding never happens at search
-// time.
+// Thin, browser-callable wrapper over the shared Nominatim geocoder in
+// ../_shared/geocode.ts (which is the ONLY code that fetches Nominatim — this file
+// does no fetching of its own). The client calls this once at write time (posting a
+// spot, saving a waitlist entry), gets back { lat, lng }, and stores the coordinates.
 //
 // Request body (JSON):  { "address": "123 Newbury St, Boston, MA" }
 // Response (JSON):       { "lat": 42.35, "lng": -71.08 }  — or { lat: null, lng: null }
@@ -47,6 +47,8 @@ Deno.serve(async (req) => {
 
     const address =
       typeof body.address === "string" ? body.address.trim() : "";
+    console.log(`geocode-address: received address=${JSON.stringify(address)}`);
+
     if (!address) {
       return new Response(
         JSON.stringify({ error: "No address provided." }),
@@ -57,7 +59,10 @@ Deno.serve(async (req) => {
     // Best-effort: coords may be null if unresolved — return 200 either way so the
     // caller can still save the row (with null coordinates).
     const coords = await geocodeAddress(address);
-    return new Response(JSON.stringify(coords ?? { lat: null, lng: null }), {
+    const payload = coords ?? { lat: null, lng: null };
+    console.log(`geocode-address: returning ${JSON.stringify(payload)}`);
+
+    return new Response(JSON.stringify(payload), {
       status: 200,
       headers: jsonHeaders,
     });

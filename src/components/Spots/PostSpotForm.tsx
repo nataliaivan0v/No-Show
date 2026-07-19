@@ -204,7 +204,9 @@ export default function PostSpotForm({ posterId }: { posterId: string }) {
 
       // invoke() sets `error` on any non-2xx (bad image, unparseable output, etc.).
       if (error || !data || (data as { error?: string }).error) {
-        setAutofillMsg("Couldn't read that one, please fill the form manually.");
+        setAutofillMsg(
+          "Couldn't read that one, please fill the form manually.",
+        );
         return;
       }
 

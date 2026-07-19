@@ -30,6 +30,8 @@ const TIME_PREFS = [
   { value: "afternoon", label: "Afternoon", hint: "12pm – 5pm" },
   { value: "evening", label: "Evening", hint: "After 5pm" },
 ];
+// Distance options (miles) for the "how far will you travel" selector
+const DISTANCE_OPTIONS = [2, 5, 10, 25];
 
 export default function WaitlistForm({ seekerId }: { seekerId: string }) {
   // existing: the seeker's current waitlist entry, or null if they haven't joined yet
@@ -61,6 +63,7 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
           setSelectedTypes(data.class_types);
           setClassLevel(data.class_level ?? "");
           setTimePref(data.time_preferences ?? []);
+          setLocationInput(data.location ?? "");
           setMaxDistance(data.max_distance_miles ?? 10);
         }
         setLoading(false);
@@ -82,8 +85,10 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       return;
     }
 
-    // Geocode the preferred address once, at write time (best-effort → null coords).
-    const { lat, lng } = await geocode(locationInput);
+    // Geocode the preferred address once, at write time — same approach as the spots
+    // path, reusing the shared geocode() helper (best-effort → null coords on failure).
+    const trimmedLocation = locationInput.trim();
+    const { lat, lng } = await geocode(trimmedLocation);
 
     const { data, error } = await supabase
       .from("waitlist_entries")
@@ -92,6 +97,7 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
         class_types: selectedTypes,
         class_level: classLevel || null,
         time_preferences: timePref.length ? timePref : null,
+        location: trimmedLocation || null,
         lat,
         lng,
         max_distance_miles: maxDistance,
@@ -122,11 +128,13 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
     }
     if (!existing) return;
 
+    const trimmedLocation = locationInput.trim();
     const updatePayload: {
       class_types: string[];
       class_level: string | null;
       time_preferences: string[] | null;
       max_distance_miles: number;
+      location: string | null;
       lat?: number | null;
       lng?: number | null;
     } = {
@@ -134,13 +142,15 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       class_level: classLevel || null,
       time_preferences: timePref.length ? timePref : null,
       max_distance_miles: maxDistance,
+      location: trimmedLocation || null,
     };
 
-    // Only re-geocode when the seeker typed a new address; otherwise leave the
-    // previously saved lat/lng untouched (the address text isn't stored, so a blank
-    // field means "unchanged", not "clear it").
-    if (locationInput.trim()) {
-      const { lat, lng } = await geocode(locationInput);
+    // Re-geocode only when the address actually changed (avoids a needless Nominatim
+    // call on preference-only edits). Cleared address → clear the coordinates too.
+    if (trimmedLocation !== (existing.location ?? "")) {
+      const { lat, lng } = trimmedLocation
+        ? await geocode(trimmedLocation)
+        : { lat: null, lng: null };
       updatePayload.lat = lat;
       updatePayload.lng = lng;
     }
@@ -172,7 +182,7 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       setClassLevel(existing.class_level ?? "");
       setTimePref(existing.time_preferences ?? []);
       setMaxDistance(existing.max_distance_miles ?? 10);
-      setLocationInput("");
+      setLocationInput(existing.location ?? "");
     }
     setEditing(false);
     setStatus("");
@@ -263,13 +273,19 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
               </PreferenceSection>
             ) : null}
 
+            {existing.location ? (
+              <PreferenceSection label="Preferred Location">
+                <div style={{ display: "flex", justifyContent: "center" }}>
+                  <Pill label={`📍 ${existing.location}`} active />
+                </div>
+              </PreferenceSection>
+            ) : null}
+
             {existing.max_distance_miles ? (
               <PreferenceSection label="Search Radius">
                 <div style={{ display: "flex", justifyContent: "center" }}>
                   <Pill
-                    label={`Within ${existing.max_distance_miles} miles${
-                      existing.lat != null ? " of your location" : ""
-                    }`}
+                    label={`Within ${existing.max_distance_miles} miles`}
                     active
                   />
                 </div>
@@ -391,14 +407,10 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
 
             <PreferenceSection
               label="Preferred Location"
-              hint={
-                existing
-                  ? "optional — leave blank to keep your saved location"
-                  : "optional — we'll match spots near this address"
-              }
+              hint="Enter a neighborhood or address so we can match you to nearby classes."
             >
               <input
-                placeholder="e.g. 123 Newbury St, Boston, MA"
+                placeholder="e.g. Back Bay, Boston or 123 Newbury St"
                 value={locationInput}
                 onChange={(e) => setLocationInput(e.target.value)}
                 style={selectStyle}
@@ -406,19 +418,20 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
             </PreferenceSection>
 
             <PreferenceSection
-              label="Max Distance (miles)"
+              label="Max Distance"
               hint="how far you're willing to travel"
             >
-              <input
-                type="number"
-                min={1}
-                max={100}
+              <select
                 value={maxDistance}
-                onChange={(e) =>
-                  setMaxDistance(Number(e.target.value) || 10)
-                }
+                onChange={(e) => setMaxDistance(Number(e.target.value))}
                 style={selectStyle}
-              />
+              >
+                {DISTANCE_OPTIONS.map((mi) => (
+                  <option key={mi} value={mi}>
+                    {mi} miles
+                  </option>
+                ))}
+              </select>
             </PreferenceSection>
 
             <div

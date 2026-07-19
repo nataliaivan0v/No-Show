@@ -34,6 +34,7 @@ export interface WaitlistEntry {
   class_types: string[]; // multi-select, seeker is interested in any of these types
   class_level: string | null;
   time_preferences: string[] | null; // "morning" | "afternoon" | "evening", or null for any
+  location: string | null; // seeker's preferred address/neighborhood (geocoded to lat/lng)
   lat: number | null; // seeker's preferred location, geocoded at write time
   lng: number | null;
   max_distance_miles: number; // how far the seeker will travel (default 10)

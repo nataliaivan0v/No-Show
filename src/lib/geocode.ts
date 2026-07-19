@@ -15,10 +15,19 @@ export async function geocode(
       body: { address: query },
     });
     if (error || !data) return { lat: null, lng: null };
-    return {
-      lat: typeof data.lat === "number" ? data.lat : null,
-      lng: typeof data.lng === "number" ? data.lng : null,
+
+    // Coerce to numbers and accept "lon" as a fallback for "lng", so a stale
+    // function that returns strings or Nominatim's raw "lon" still works.
+    const d = data as { lat?: unknown; lng?: unknown; lon?: unknown };
+    const toNum = (v: unknown): number | null => {
+      const n =
+        typeof v === "number" ? v : typeof v === "string" ? parseFloat(v) : NaN;
+      return Number.isFinite(n) ? n : null;
     };
+    const lat = toNum(d.lat);
+    const lng = toNum(d.lng ?? d.lon);
+    console.log("geocode(): address", query, "→", { lat, lng });
+    return { lat, lng };
   } catch {
     return { lat: null, lng: null };
   }
