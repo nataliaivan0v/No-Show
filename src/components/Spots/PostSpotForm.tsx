@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../../lib/supabase";
+import { geocode } from "../../lib/geocode";
 
 // Options for the class type and level dropdowns
 const CLASS_TYPES = [
@@ -125,12 +126,18 @@ export default function PostSpotForm({ posterId }: { posterId: string }) {
       ? `${bookingLine}\n${claimInfo.trim()}`
       : bookingLine;
 
+    // Geocode the address once, here at write time (never during search).
+    // Best-effort: if it fails, the spot is still posted with null coordinates.
+    const { lat, lng } = await geocode(location.trim());
+
     const { error } = await supabase.from("spots").insert({
       poster_id: posterId,
       title: className.trim(),
       class_type: classType,
       studio,
       location: location.trim() || null,
+      lat,
+      lng,
       scheduled_at: scheduledAt,
       class_level: classLevel || null,
       instructor: instructor.trim() || null,

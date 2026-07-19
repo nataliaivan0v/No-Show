@@ -17,6 +17,8 @@ export interface Spot {
   class_type: string;
   studio: string;
   location: string | null;
+  lat: number | null; // geocoded from location at write time (migrations/09_location.sql)
+  lng: number | null;
   scheduled_at: string; // ISO timestamp of the class
   class_level: string | null;
   instructor: string | null;
@@ -32,6 +34,9 @@ export interface WaitlistEntry {
   class_types: string[]; // multi-select, seeker is interested in any of these types
   class_level: string | null;
   time_preferences: string[] | null; // "morning" | "afternoon" | "evening", or null for any
+  lat: number | null; // seeker's preferred location, geocoded at write time
+  lng: number | null;
+  max_distance_miles: number; // how far the seeker will travel (default 10)
   created_at: string; // used as the queue position; bumped to now after a successful claim
 }
 

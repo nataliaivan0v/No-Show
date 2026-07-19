@@ -11,3 +11,8 @@ verify_jwt = false
 # Listed here so a future redeploy doesn't silently revert it to verify_jwt = true.
 [functions.send-notification-email]
 verify_jwt = false
+
+# Browser-called (functions.invoke) from the post-spot and waitlist forms, so the
+# CORS preflight must not be rejected by JWT verification before our code runs.
+[functions.geocode-address]
+verify_jwt = false

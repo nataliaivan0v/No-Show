@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../../lib/supabase";
+import { geocode } from "../../lib/geocode";
 import { type WaitlistEntry } from "../../types";
 
 // Options for the preference dropdowns/pills
@@ -36,6 +37,11 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [classLevel, setClassLevel] = useState("");
   const [timePref, setTimePref] = useState<string[]>([]);
+  // Preferred location (address text, geocoded on save) + how far the seeker travels.
+  // The address text isn't stored (only lat/lng + distance are), so it's left blank
+  // on edit; the saved distance is reloaded below.
+  const [locationInput, setLocationInput] = useState("");
+  const [maxDistance, setMaxDistance] = useState(10);
   const [editing, setEditing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
@@ -55,6 +61,7 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
           setSelectedTypes(data.class_types);
           setClassLevel(data.class_level ?? "");
           setTimePref(data.time_preferences ?? []);
+          setMaxDistance(data.max_distance_miles ?? 10);
         }
         setLoading(false);
       });
@@ -75,6 +82,9 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       return;
     }
 
+    // Geocode the preferred address once, at write time (best-effort → null coords).
+    const { lat, lng } = await geocode(locationInput);
+
     const { data, error } = await supabase
       .from("waitlist_entries")
       .insert({
@@ -82,6 +92,9 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
         class_types: selectedTypes,
         class_level: classLevel || null,
         time_preferences: timePref.length ? timePref : null,
+        lat,
+        lng,
+        max_distance_miles: maxDistance,
       })
       .select()
       .single();
@@ -109,13 +122,32 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
     }
     if (!existing) return;
 
+    const updatePayload: {
+      class_types: string[];
+      class_level: string | null;
+      time_preferences: string[] | null;
+      max_distance_miles: number;
+      lat?: number | null;
+      lng?: number | null;
+    } = {
+      class_types: selectedTypes,
+      class_level: classLevel || null,
+      time_preferences: timePref.length ? timePref : null,
+      max_distance_miles: maxDistance,
+    };
+
+    // Only re-geocode when the seeker typed a new address; otherwise leave the
+    // previously saved lat/lng untouched (the address text isn't stored, so a blank
+    // field means "unchanged", not "clear it").
+    if (locationInput.trim()) {
+      const { lat, lng } = await geocode(locationInput);
+      updatePayload.lat = lat;
+      updatePayload.lng = lng;
+    }
+
     const { data, error } = await supabase
       .from("waitlist_entries")
-      .update({
-        class_types: selectedTypes,
-        class_level: classLevel || null,
-        time_preferences: timePref.length ? timePref : null,
-      })
+      .update(updatePayload)
       .eq("id", existing.id)
       .select()
       .single();
@@ -139,6 +171,8 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
       setSelectedTypes(existing.class_types);
       setClassLevel(existing.class_level ?? "");
       setTimePref(existing.time_preferences ?? []);
+      setMaxDistance(existing.max_distance_miles ?? 10);
+      setLocationInput("");
     }
     setEditing(false);
     setStatus("");
@@ -225,6 +259,19 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
                       active
                     />
                   ))}
+                </div>
+              </PreferenceSection>
+            ) : null}
+
+            {existing.max_distance_miles ? (
+              <PreferenceSection label="Search Radius">
+                <div style={{ display: "flex", justifyContent: "center" }}>
+                  <Pill
+                    label={`Within ${existing.max_distance_miles} miles${
+                      existing.lat != null ? " of your location" : ""
+                    }`}
+                    active
+                  />
                 </div>
               </PreferenceSection>
             ) : null}
@@ -340,6 +387,38 @@ export default function WaitlistForm({ seekerId }: { seekerId: string }) {
                   </button>
                 ))}
               </div>
+            </PreferenceSection>
+
+            <PreferenceSection
+              label="Preferred Location"
+              hint={
+                existing
+                  ? "optional — leave blank to keep your saved location"
+                  : "optional — we'll match spots near this address"
+              }
+            >
+              <input
+                placeholder="e.g. 123 Newbury St, Boston, MA"
+                value={locationInput}
+                onChange={(e) => setLocationInput(e.target.value)}
+                style={selectStyle}
+              />
+            </PreferenceSection>
+
+            <PreferenceSection
+              label="Max Distance (miles)"
+              hint="how far you're willing to travel"
+            >
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={maxDistance}
+                onChange={(e) =>
+                  setMaxDistance(Number(e.target.value) || 10)
+                }
+                style={selectStyle}
+              />
             </PreferenceSection>
 
             <div
