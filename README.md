@@ -53,6 +53,9 @@ A peer-to-peer fitness spot exchange. If you can't make a class you signed up fo
 | Server-side logic | Postgres functions + triggers (`SECURITY DEFINER`) |
 | Scheduled jobs | pg_cron (notification expiry, every minute) |
 | Email | Supabase Edge Function (Deno) + Resend, via a Database Webhook |
+| Geocoding | Nominatim / OpenStreetMap via the `geocode-address` edge function (free, no Places API) |
+| Distance math | `earthdistance` (+ `cube`) in Postgres |
+| AI extraction | Anthropic API (vision) via the `parse-booking-screenshot` edge function |
 | Routing | React Router v6 |
 | Fonts | Berkshire Swash, Afacad (Google Fonts) |
 
@@ -167,8 +170,9 @@ All matching, notification creation, claiming, and expiry run **inside the datab
 |---|---|---|
 | `handle_new_user()` | trigger on `auth.users` | Creates a `profiles` row on signup |
 | `spot_time_of_day(ts)` | helper | Buckets a class time into morning / afternoon / evening |
-| `notify_seeker_for_spot(spot_id)` | `SECURITY DEFINER` | Core matcher: finds the next eligible seeker (exact → fallback, FIFO, skipping anyone already offered the spot) and inserts one pending notification |
+| `notify_seeker_for_spot(spot_id)` | `SECURITY DEFINER` | Core matcher: finds the next eligible seeker (exact → fallback, FIFO, skipping anyone already offered the spot) and inserts one pending notification. Also filters by distance — `earthdistance` between the spot's and seeker's coordinates vs the seeker's `max_distance_miles` — **fail-open** when either coordinate is missing |
 | `spots_notify_on_insert()` | `AFTER INSERT` trigger on `spots` | Runs the matcher when a spot is posted |
+| `geocode-address` | Edge Function (Deno) | Geocodes an address to `{ lat, lng }` via Nominatim/OpenStreetMap; called once at write time when a spot is posted or a waitlist entry is saved (never during search) |
 | `notify_available_spots_for_me()` | `SECURITY DEFINER` RPC | When a seeker joins/updates the waitlist, matches already-available spots |
 | `claim_spot(spot, notif, entry)` | `SECURITY DEFINER` RPC | Atomically claims a spot (only if still available), marks the notification claimed, bumps the seeker to the back of the queue, and returns booking info |
 | `reject_and_advance(notif)` | `SECURITY DEFINER` RPC | "Not Interested": expires the offer and advances the queue |
@@ -246,6 +250,28 @@ sequenceDiagram
 
 Setup steps (secrets + creating the webhook) are in [`docs/EMAIL_SETUP.md`](docs/EMAIL_SETUP.md).
 
+### AI screenshot autofill
+
+Posting a spot can be pre-filled from a screenshot of a booking confirmation, so the poster doesn't type everything by hand:
+
+1. In the post-spot form the user uploads a screenshot; the browser sends it (base64) to the **`parse-booking-screenshot` Edge Function** ([`supabase/functions/parse-booking-screenshot/`](supabase/functions/parse-booking-screenshot/)).
+2. The function calls the **Anthropic API (vision)** with the image, asking it to extract the class fields (studio, class name, type, date, time, location, level, instructor) as strict JSON.
+3. The parsed fields pre-fill the form. **The user reviews and edits before submitting** — nothing is auto-posted, and if parsing fails the form is simply left untouched for manual entry.
+
+```mermaid
+sequenceDiagram
+    participant U as Browser (post-spot form)
+    participant EF as parse-booking-screenshot (Edge Function)
+    participant AI as Anthropic API (vision)
+
+    U->>EF: POST screenshot (base64)
+    EF->>AI: image + "extract these fields as JSON"
+    AI-->>EF: { studio, title, class_type, date, time, ... }
+    EF-->>U: parsed fields → pre-fill form (user reviews, then submits)
+```
+
+**The Anthropic API key stays server-side** — it lives only in the edge function's environment and is never exposed to the browser.
+
 ## Database Schema
 
 No Show uses four tables in Supabase Postgres. Row Level Security (RLS) is enabled on all tables and locked down to **least privilege**: the client may only read/write its own rows. Every cross-user write (creating a notification for someone else, claiming a spot, advancing the queue) goes through a `SECURITY DEFINER` function that bypasses RLS in a controlled way — so the permissive policies the browser used to need have been removed.
@@ -266,7 +292,7 @@ Stores basic user information. A row is automatically created via a Postgres tri
 
 **Policies**
 
-- **Readable by all authenticated users** — The matching engine needs to read any user's profile to auto-fill the booking name when a spot is posted. Without this, the form couldn't fetch the poster's name.
+- **Readable by all authenticated users** — Now that matching runs server-side (in `SECURITY DEFINER` functions that bypass RLS), no client flow actually requires reading *other* users' profiles: a user reads their own profile, and a poster's booking name is baked into `claim_info` at post time rather than looked up by the seeker. This policy is kept as a low-sensitivity default — `profiles` holds only a display name — and could safely be narrowed to owner-only.
 - **Editable by owner only** — A user can only update their own profile row, preventing anyone from modifying another user's name or details.
 
 ---
@@ -283,6 +309,8 @@ Stores every class spot that has been posted. Each spot belongs to the user who 
 | class_type | text | e.g. Yoga, Spin |
 | studio | text | Studio name |
 | location | text | Studio address |
+| lat | double precision | Geocoded from `location` at write time |
+| lng | double precision | Geocoded from `location` at write time |
 | scheduled_at | timestamptz | Class date and time |
 | class_level | text | Optional |
 | instructor | text | Optional |
@@ -313,6 +341,10 @@ Stores each user's waitlist preferences. A user can have one active entry specif
 | class_types | text[] | Array of preferred class types |
 | class_level | text | Optional preferred level |
 | time_preferences | text[] | morning / afternoon / evening |
+| location | text | Preferred address/neighborhood (geocoded to lat/lng) |
+| lat | double precision | Geocoded from `location` at write time |
+| lng | double precision | Geocoded from `location` at write time |
+| max_distance_miles | int | How far the seeker will travel (default 10) |
 | created_at | timestamptz | Used to determine queue position |
 
 A unique index enforces **one waitlist entry per user**.
@@ -386,4 +418,8 @@ stateDiagram-v2
 
 ## Notes
 
-This project was built as a portfolio piece. Notification expiry runs server-side via a `pg_cron` job that sweeps every minute; the client-side countdown is only a display. SMS delivery is not wired up — in production the in-app notification would be paired with real SMS via Twilio. Studio address fields would integrate with the Google Maps Places API for address autocomplete and validation, which would also enable location-based filtering on the waitlist queue, so seekers could be matched to spots within a preferred distance rather than across all locations.
+This project was built as a portfolio piece. Notification expiry runs server-side via a `pg_cron` job that sweeps every minute; the client-side countdown is only a display.
+
+Location-based filtering is **implemented**: addresses are geocoded exactly once at write time (when a spot is posted or a waitlist entry is saved) via the free Nominatim/OpenStreetMap service, and the resulting coordinates are stored on the row. Matching then filters by distance directly in SQL with `earthdistance` (comparing a spot to each seeker's `max_distance_miles`) — no geocoding and no paid API call happens per search. The distance filter is deliberately **fail-open**: if an address couldn't be geocoded (so its `lat`/`lng` is null), that row still matches on the other criteria rather than being silently dropped, which keeps a geocoding hiccup from making a spot match nobody.
+
+Genuine future work: SMS delivery is not wired up — in production the in-app notification and email would be paired with real SMS via Twilio.

@@ -92,9 +92,9 @@ create index if not exists spots_poster_id_idx
 
 alter table public.spots enable row level security;
 
-create policy "spots: read (authenticated)"
-  on public.spots for select to authenticated
-  using (true);
+create policy "profiles: read own"
+  on public.profiles for select to authenticated
+  using (auth.uid() = id);
 
 create policy "spots: insert (authenticated)"
   on public.spots for insert to authenticated
