@@ -8,6 +8,7 @@ A peer-to-peer fitness spot exchange. If you can't make a class you signed up fo
 
 **Spot Posting**
 - Post a class spot with studio name, class name, address, date, time, class type, level, and instructor
+- Autofill the form from a screenshot of your booking confirmation — an AI vision model extracts the class details for you to review before posting
 - Booking name is auto-filled from your profile
 - Add additional booking info (door codes, check-in notes) that is only revealed after someone claims the spot
 - Delete a listing anytime before it's claimed
@@ -15,11 +16,13 @@ A peer-to-peer fitness spot exchange. If you can't make a class you signed up fo
 
 **Waitlist**
 - Join the waitlist by selecting preferred class types, class level, and time of day (morning, afternoon, evening)
+- Set a preferred location and maximum travel distance so you're only matched to nearby spots
 - Matching engine finds the best fit from the waitlist when a spot is posted
 - Preferences can be updated at any time
 
 **Smart Matching & Queue**
 - When a spot is posted, the system matches against waitlist preferences (class type, level, and time of day)
+- Only matches spots within the seeker's chosen distance — addresses are geocoded and distance is computed in the database (rows without coordinates still match on the other criteria)
 - Falls back to class-type-only matching if no exact match is found
 - If a seeker doesn't claim within 30 minutes, the spot automatically moves to the next person in line
 - Seekers can also click "Not Interested" to pass and advance the queue
@@ -31,6 +34,7 @@ A peer-to-peer fitness spot exchange. If you can't make a class you signed up fo
 - Booking info (name, door code, etc.) is revealed only after claiming
 - Notifications can be individually deleted or cleared all at once
 - Notification badge on the navbar updates in real time and clears when inbox is visited
+- Seekers get an email when a spot is offered to them; posters get an email if their spot couldn't be filled (no one matched, or everyone in line passed)
 
 **Dashboard**
 - Overview of upcoming claimed classes and active listings side by side
@@ -52,7 +56,7 @@ A peer-to-peer fitness spot exchange. If you can't make a class you signed up fo
 | Real-time | Supabase Realtime (postgres_changes) |
 | Server-side logic | Postgres functions + triggers (`SECURITY DEFINER`) |
 | Scheduled jobs | pg_cron (notification expiry, every minute) |
-| Email | Supabase Edge Function (Deno) + Resend, via a Database Webhook |
+| Email | Supabase Edge Functions (Deno) + Resend, via Database Webhooks — seeker "spot opened" (`notifications` insert) and poster "couldn't fill your spot" (`spots` update) |
 | Geocoding | Nominatim / OpenStreetMap via the `geocode-address` edge function (free, no Places API) |
 | Distance math | `earthdistance` (+ `cube`) in Postgres |
 | AI extraction | Anthropic API (vision) via the `parse-booking-screenshot` edge function |
@@ -155,7 +159,7 @@ src/
 
 1. A user signs up for a fitness class but later can't make it
 2. They post their spot on No Show with the class details and any booking info needed to attend
-3. Posting the spot fires a Postgres `AFTER INSERT` trigger that scans the waitlist **server-side** for the best match (class type, level, and time of day, falling back to class-type-only) and inserts a notification for the matched seeker
+3. Posting the spot fires a Postgres `AFTER INSERT` trigger that scans the waitlist **server-side** for the best match — class type, level, time of day, and within the seeker's max distance, falling back to class-type-only — and inserts a notification for the matched seeker
 4. The matched seeker receives a real-time notification with a 30-minute countdown to claim the spot
 5. If they claim it, an atomic `claim_spot()` function marks the spot claimed and returns the full booking info — only one seeker can win the claim, even under a simultaneous race
 6. If they click "Not Interested" (`reject_and_advance()`) or the 30-minute window lapses (a `pg_cron` job), the offer is expired and the spot is passed to the next eligible seeker automatically
@@ -177,6 +181,7 @@ All matching, notification creation, claiming, and expiry run **inside the datab
 | `claim_spot(spot, notif, entry)` | `SECURITY DEFINER` RPC | Atomically claims a spot (only if still available), marks the notification claimed, bumps the seeker to the back of the queue, and returns booking info |
 | `reject_and_advance(notif)` | `SECURITY DEFINER` RPC | "Not Interested": expires the offer and advances the queue |
 | `expire_stale_notifications()` | `pg_cron`, every minute | Expires pending offers older than 30 minutes and advances the queue |
+| `mark_spot_unfilled(spot_id)` | `SECURITY DEFINER` | Sets `spots.unfilled_notified_at` once (never if claimed/deleted) when the matcher hits a dead end, so the poster is emailed exactly once that the spot couldn't be filled |
 
 The client-side 30-minute countdown is now **purely a display**; the authoritative expiry is the `pg_cron` job.
 
@@ -202,6 +207,7 @@ flowchart TD
         CS[["claim_spot()"]]
         RA[["reject_and_advance()"]]
         CRON{{"pg_cron: expire_stale_notifications()<br/>every minute"}}
+        MU[["mark_spot_unfilled()"]]
     end
 
     P -->|INSERT| SP
@@ -220,6 +226,8 @@ flowchart TD
     RA -.->|advance queue| M
     CRON -->|pending over 30 min: status=expired| NT
     CRON -.->|advance queue| M
+    M -.->|no candidate found| MU
+    MU -->|unfilled_notified_at set once| SP
 ```
 
 ### Email notifications
@@ -249,6 +257,28 @@ sequenceDiagram
 **Booking secrets are never emailed.** The function explicitly selects only non-secret spot fields and never reads `claim_info` — door codes and check-in details are revealed only in the app after the seeker claims the spot. Email is also **best-effort**: any failure (missing email, Resend error) is logged and the function still returns `200`, so a bad email can never block matching or cause the webhook to retry forever.
 
 Setup steps (secrets + creating the webhook) are in [`docs/EMAIL_SETUP.md`](docs/EMAIL_SETUP.md).
+
+### Unfilled-spot email
+
+The **poster** also gets an email when No Show couldn't fill their spot — either no one on the waitlist matched at post time, or everyone who was offered it expired/declined and the queue ran out. Both cases end up at the same point in `notify_seeker_for_spot()` (no candidate found), which calls `mark_spot_unfilled()`. That flips `spots.unfilled_notified_at` from null to now **exactly once** (and never for a claimed or deleted spot), and that `UPDATE` fires a **Database Webhook on `spots`** → the **`send-unfilled-spot-email` Edge Function** ([`supabase/functions/send-unfilled-spot-email/`](supabase/functions/send-unfilled-spot-email/)). The function only emails on the null→set transition, so the every-minute expiry cron can retry the matcher without ever sending twice. The email is sent **once ever per spot** — a spot notified in the no-match case won't email again even if it later gets matched (see [`docs/EMAIL_SETUP.md`](docs/EMAIL_SETUP.md) for how to switch to re-notify-on-later-exhaustion). Like the seeker email it's best-effort and never touches `claim_info`.
+
+```mermaid
+sequenceDiagram
+    participant M as notify_seeker_for_spot()
+    participant DB as Postgres (spots)
+    participant WH as Database Webhook
+    participant EF as send-unfilled-spot-email (Edge Function)
+    participant RS as Resend
+    participant U as Poster's inbox
+
+    M->>DB: no candidate → mark_spot_unfilled() sets unfilled_notified_at (once)
+    DB->>WH: UPDATE (spots row)
+    WH->>EF: POST webhook payload (record + old_record)
+    EF->>EF: send only if null→set transition and status ≠ claimed
+    EF->>DB: look up poster email (service role)
+    EF->>RS: send "couldn't fill your spot" email (class details, no claim_info)
+    RS-->>U: email delivered
+```
 
 ### AI screenshot autofill
 
@@ -288,6 +318,7 @@ Stores basic user information. A row is automatically created via a Postgres tri
 |---|---|---|
 | id | uuid | References `auth.users` |
 | full_name | text | Set at signup |
+| email | text | Copied from the auth user on signup |
 | created_at | timestamptz | Auto-set |
 
 **Policies**
@@ -318,6 +349,7 @@ Stores every class spot that has been posted. Each spot belongs to the user who 
 | status | text | `available` or `claimed` (check constraint) |
 | claimed_by | uuid | Seeker who claimed the spot (references `profiles`) |
 | created_at | timestamptz | Auto-set |
+| unfilled_notified_at | timestamptz | Set once when the poster has been emailed that the spot couldn't be filled; the idempotency guard for the unfilled-spot email (null until then) |
 
 A check constraint enforces that a spot is posted **at least 1 hour before** `scheduled_at` (`scheduled_at >= created_at + interval '1 hour'`).
 

@@ -12,6 +12,10 @@ verify_jwt = false
 [functions.send-notification-email]
 verify_jwt = false
 
+# Also called by a Database Webhook (spots UPDATE), so it skips JWT verification too.
+[functions.send-unfilled-spot-email]
+verify_jwt = false
+
 # Browser-called (functions.invoke) from the post-spot and waitlist forms, so the
 # CORS preflight must not be rejected by JWT verification before our code runs.
 [functions.geocode-address]

@@ -79,6 +79,10 @@ create table if not exists public.spots (
                  check (status in ('available', 'claimed')),
   claimed_by   uuid references public.profiles (id),  -- seeker who claimed it
   created_at   timestamptz not null default now(),
+  -- Set exactly once (null -> now()) when the poster has been emailed that we couldn't
+  -- fill this spot. Idempotency guard for the unfilled-spot email; see
+  -- mark_spot_unfilled(). The null -> now() UPDATE is what fires the spots webhook.
+  unfilled_notified_at timestamptz,
   -- Spot must be posted at least 1 hour before the class (anchored to created_at,
   -- not now(), so it stays immutable across later updates like claiming).
   constraint spots_posted_at_least_1h_before
@@ -92,9 +96,9 @@ create index if not exists spots_poster_id_idx
 
 alter table public.spots enable row level security;
 
-create policy "profiles: read own"
-  on public.profiles for select to authenticated
-  using (auth.uid() = id);
+create policy "spots: read (authenticated)"
+  on public.spots for select to authenticated
+  using (true);
 
 create policy "spots: insert (authenticated)"
   on public.spots for insert to authenticated
@@ -229,6 +233,27 @@ as $$
          end;
 $$;
 
+-- Idempotency guard + dispatch point for the "we couldn't fill your spot" email.
+-- Sets spots.unfilled_notified_at exactly once (null -> now()); that UPDATE is what
+-- fires the Database Webhook on spots that calls the send-unfilled-spot-email function.
+-- The WHERE clause makes this safe to call repeatedly (the every-minute expiry cron
+-- calls notify_seeker_for_spot, which calls this): it matches a row only the FIRST
+-- time, and NEVER for a claimed spot (status <> 'available') or a deleted one (no row).
+create or replace function public.mark_spot_unfilled(p_spot_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  update public.spots
+     set unfilled_notified_at = now()
+   where id = p_spot_id
+     and status = 'available'
+     and unfilled_notified_at is null;
+end;
+$$;
+
 -- Core matcher: finds the best-matching, in-range, not-yet-notified seeker for a spot
 -- (Tier 1 exact class_type+level+time, Tier 2 class-type-only) and inserts one pending
 -- notification. Distance filter is fail-open when either side lacks coordinates.
@@ -301,6 +326,12 @@ begin
   end if;
 
   if not found then
+    -- No eligible seeker for this spot. Every dead-end routes through here: the
+    -- post-time trigger (condition a, "no match at post time") and the expiry cron /
+    -- reject_and_advance advancement (condition b, "queue exhausted"). Mark the spot
+    -- unfilled so the poster is emailed exactly once (no-op if already marked, claimed,
+    -- or deleted).
+    perform public.mark_spot_unfilled(p_spot_id);
     return null;
   end if;
 
