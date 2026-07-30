@@ -14,7 +14,14 @@ export default function LandingPage() {
         <div className="lp-nav-links">
           <a href="#how-it-works">How it works</a>
           <a href="#for-who">Who it's for</a>
-          <a href="/login" style={{ color: "#444" }}>
+          <a
+            href="/login"
+            style={{ color: "#444", cursor: "pointer" }}
+            onClick={(e) => {
+              e.preventDefault();
+              nav("/login");
+            }}
+          >
             Log in
           </a>
           <button className="lp-btn-primary" onClick={() => nav("/signup")}>
